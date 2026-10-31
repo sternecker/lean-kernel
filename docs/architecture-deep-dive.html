@@ -1,0 +1,345 @@
+<title>Agent Sandbox Deep Dive</title>
+<meta name="viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: a single reading column for a reference sheet. Walkthrough, then a glossary grouped by layer, then gaps and the Kata comparison. Same tokens as architecture.html. */
+:root {
+  --bg: #f6f7f8;
+  --panel: #ffffff;
+  --fg: #1b2026;
+  --muted: #5b6672;
+  --line: #c9d0d7;
+  --token: #b4690e;
+  --blocked: #c0392b;
+  --tint: #eef3f8;
+  --display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #12161b; --panel: #1a2027; --fg: #e3e8ee; --muted: #9aa6b2; --line: #39434e;
+    --token: #e6a04a; --blocked: #ef6a5a; --tint: #1c2631; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #12161b; --panel: #1a2027; --fg: #e3e8ee; --muted: #9aa6b2; --line: #39434e;
+  --token: #e6a04a; --blocked: #ef6a5a; --tint: #1c2631; color-scheme: dark;
+}
+body {
+  background: var(--bg); color: var(--fg); font-family: var(--body); font-size: 15.5px; line-height: 1.6;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 32px 64px;
+}
+main { max-width: 760px; margin: 0 auto; display: grid; gap: 40px; }
+main > * { min-width: 0; }
+header { display: grid; gap: 10px; }
+.eyebrow { font-family: var(--mono); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+h1 { font-family: var(--display); font-weight: 600; font-size: 34px; line-height: 1.12; margin: 0; text-wrap: balance; }
+h2 { font-family: var(--display); font-weight: 600; font-size: 24px; line-height: 1.2; margin: 0 0 14px; text-wrap: balance; }
+h3 { font-family: var(--mono); font-weight: 500; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+p { margin: 0; }
+section > p + p, section > p + ol, section > p + ul, section > ol + p { margin-top: 12px; }
+a { color: inherit; text-decoration-color: var(--muted); text-underline-offset: 3px; }
+a:focus-visible { outline: 2px solid var(--token); outline-offset: 2px; border-radius: 2px; }
+code { font-family: var(--mono); font-size: .88em; background: var(--tint); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+.lede { color: var(--muted); font-size: 16.5px; }
+.thesis { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
+.thesis strong { font-family: var(--display); font-size: 17px; }
+
+nav.toc { display: flex; flex-wrap: wrap; gap: 8px; }
+nav.toc a { font-family: var(--mono); font-size: 12px; text-decoration: none; border: 1px solid var(--line); border-radius: 999px; padding: 4px 10px; background: var(--panel); }
+nav.toc a:hover { border-color: var(--muted); }
+
+ol.steps { margin: 0; padding: 0; list-style: none; counter-reset: s; display: grid; gap: 14px; }
+ol.steps > li { counter-increment: s; display: grid; grid-template-columns: 32px 1fr; gap: 12px; }
+ol.steps > li > div { min-width: 0; }
+ol.steps > li::before { content: counter(s); font-family: var(--mono); font-size: 13px; font-weight: 500; width: 26px; height: 26px; border-radius: 50%; border: 1.5px solid var(--fg); display: grid; place-items: center; margin-top: 1px; }
+ol.steps ul { margin: 8px 0 0; padding-left: 18px; display: grid; gap: 4px; }
+.tok { color: var(--token); font-weight: 600; }
+.blk { color: var(--blocked); font-weight: 600; }
+
+dl { margin: 0; display: grid; gap: 18px; }
+dt { font-weight: 600; }
+dt .abbr { font-weight: 400; color: var(--muted); }
+dd { margin: 4px 0 0; }
+dd ul { margin: 6px 0 0; padding-left: 18px; display: grid; gap: 3px; }
+.here { margin-top: 6px; padding-left: 12px; border-left: 2px solid var(--line); color: var(--muted); font-size: 14.5px; }
+.here b { color: var(--fg); font-weight: 600; }
+
+ol.gaps { margin: 0; padding-left: 22px; display: grid; gap: 10px; }
+
+.scroll { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; min-width: 560px; }
+th, td { text-align: left; vertical-align: top; padding: 9px 10px; border-bottom: 1px solid var(--line); }
+th { font-family: var(--mono); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 500; }
+td:first-child { font-weight: 600; }
+.verdict { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; display: grid; gap: 8px; }
+ul.plain { margin: 0; padding-left: 18px; display: grid; gap: 6px; }
+.sources { font-size: 13.5px; color: var(--muted); }
+.sources ul { padding-left: 18px; margin: 8px 0 0; display: grid; gap: 4px; overflow-wrap: anywhere; }
+</style>
+
+<main>
+  <header>
+    <div class="eyebrow">lean-kernel · design reference · 2026-10-30</div>
+    <h1>Agent Sandbox Deep Dive</h1>
+    <p class="lede">A walk through one request in the agent sandbox, then every term the design uses, layer by layer, with why each one matters here. The diagram lives at <a href="architecture.html">Agent Sandbox Architecture</a>.</p>
+  </header>
+
+  <p class="thesis"><strong>The design in one sentence.</strong> The agent runs on a different kernel from the host, has no network, and holds no secrets. Its only way out is one socket to one host process, and that process decides, adds credentials and records every request.</p>
+
+  <nav class="toc" aria-label="Sections">
+    <a href="#walkthrough">Walkthrough</a>
+    <a href="#virtualization">Virtualization</a>
+    <a href="#channels">Guest–host channels</a>
+    <a href="#guest">Inside the guest</a>
+    <a href="#proxy">Proxy</a>
+    <a href="#credentials">Credentials</a>
+    <a href="#gpu">GPU</a>
+    <a href="#gaps">Gaps</a>
+    <a href="#kata">Kata Containers</a>
+  </nav>
+
+  <section id="walkthrough">
+    <h2>One request, end to end</h2>
+    <p>The agent's GitHub tool wants to open an issue.</p>
+    <ol class="steps">
+      <li><div><b>The tool calls the proxy in plain HTTP.</b> <code>POST http://127.0.0.1:8080/github/repos/x/y/issues</code>, with no <code>Authorization</code> header. The tool has no token, and the guest has none to give it.</div></li>
+      <li><div><b>The request goes onto vsock.</b> The guest has no network card, but vsock is its own socket family and doesn't need one. There are three ways onto it:
+        <ul>
+          <li><b>The tool opens <code>AF_VSOCK</code> itself</b> and connects to CID 2 (the host), port 8080. Python's <code>socket.AF_VSOCK</code>, Go's <code>mdlayher/vsock</code> and Rust's <code>tokio-vsock</code> do this.</li>
+          <li><b>A Unix-socket shim:</b> <code>socat UNIX-LISTEN:/run/egress.sock,fork VSOCK-CONNECT:2:8080</code>, then any client that speaks HTTP over a Unix socket (<code>curl --unix-socket</code>, <code>httpx</code> with <code>uds=</code>).</li>
+          <li><b>A loopback TCP shim:</b> <code>socat TCP-LISTEN:8080,bind=127.0.0.1,fork VSOCK-CONNECT:2:8080</code>. Any HTTP client works unchanged, but it needs TCP/IP in the guest kernel, so only the default profile has it.</li>
+        </ul></div></li>
+      <li><div><b>The guest's virtio-vsock driver queues the bytes</b> in a ring buffer in guest memory and notifies the device.</div></li>
+      <li><div><b>KVM traps the notification and hands it to Firecracker.</b> Firecracker's vsock device reads the ring. It sees a connection to port 8080 and connects to the host Unix socket <code>&lt;uds_path&gt;_8080</code>. Under the jailer that's something like <code>/srv/jailer/firecracker/agent-01/root/v.sock_8080</code>.</div></li>
+      <li><div><b>Envoy is listening on that socket.</b> The listener is bound to that one file, so Envoy knows the caller is agent-01 without asking the guest anything.</div></li>
+      <li><div><b>Envoy's router matches the route.</b> <code>/github/</code> maps to the <code>github</code> cluster. A path with no route gets a 404 and never leaves the host.</div></li>
+      <li><div><b><code>ext_authz</code> asks the policy service before forwarding.</b> Envoy sends the method, path, headers, the body (up to 64 KB) and <code>{vm: agent-01, tool: github}</code>. The service checks whether this VM may use this tool, with this method on this repository path, at this size and this rate.
+        <ul>
+          <li><span class="tok">If allowed:</span> it gets a short-lived, scoped GitHub token from the credential broker and answers "OK, set <code>Authorization: Bearer …</code>".</li>
+          <li>If irreversible (say, deleting a repository): it answers "denied, pending approval" and queues the request for a human.</li>
+          <li><span class="blk">If not allowed:</span> 403, and the denial is logged.</li>
+        </ul></div></li>
+      <li><div><b>Envoy resolves <code>api.github.com</code> itself and opens TLS.</b> It verifies the certificate chain and the expected name, then sends the request with the injected token.</div></li>
+      <li><div><b>The response comes back the same way,</b> and the access log records VM, tool, method, path, status, bytes and duration.</div></li>
+    </ol>
+    <p>Model inference takes the same path to the proxy on a different route, and the proxy forwards it to the inference VM. The agent never sees a GPU, and the inference VM never sees a credential or the internet.</p>
+  </section>
+
+  <section>
+    <h2>Glossary</h2>
+    <p>Grouped by layer, from the hardware boundary outward. The indented note under each term says why it matters to this design.</p>
+
+    <h3 id="virtualization">Virtualization</h3>
+    <dl>
+      <div><dt>KVM <span class="abbr">· Kernel-based Virtual Machine</span></dt>
+        <dd>The part of the Linux kernel that uses the CPU's virtualization extensions (Intel VT-x, AMD-V) to run guest code directly on the CPU. When the guest does something privileged, such as touching a device, the CPU leaves the guest (a "VM exit"). KVM handles the exit or passes it to a userspace program.
+        <p class="here"><b>Here:</b> the boundary the whole design rests on. Nothing in this repo constrains KVM itself.</p></dd></div>
+      <div><dt>VMM <span class="abbr">· Virtual Machine Monitor</span></dt>
+        <dd>That userspace program. It emulates the devices the guest sees. Firecracker, Cloud Hypervisor and QEMU are VMMs.</dd></div>
+      <div><dt>Firecracker</dt>
+        <dd>AWS's VMM, written in Rust, built for Lambda and Fargate. It emulates only a handful of devices: virtio network, block, vsock and balloon, a serial console, and a stub keyboard controller used for reboot. It boots in about 125 ms.
+        <p class="here"><b>Here:</b> a small device model means little host code the guest can reach.</p></dd></div>
+      <div><dt>microVM</dt>
+        <dd>A VM with a minimal device model and a minimal kernel, light enough to run one per agent.</dd></div>
+      <div><dt>virtio and virtio-MMIO</dt>
+        <dd>The standard for paravirtual devices. The guest knows it's virtualized and talks through shared-memory ring buffers ("virtqueues") instead of pretending to drive real hardware. virtio-MMIO finds devices at fixed memory addresses with no PCI bus.
+        <p class="here"><b>Here:</b> that's why the lean kernel can set <code>PCI=n</code>.</p></dd></div>
+      <div><dt>jailer</dt>
+        <dd>Firecracker's companion launcher. Before starting Firecracker it creates a chroot, new mount and PID namespaces (optionally a network namespace), cgroups, and drops to an unprivileged uid. Firecracker then adds its own per-thread seccomp filters.
+        <p class="here"><b>Here:</b> if a guest escapes into the VMM, it lands in a jail with no network route.</p></dd></div>
+      <div><dt>Cloud Hypervisor, QEMU, Kata Containers</dt>
+        <dd>Cloud Hypervisor is a Rust VMM originally from Intel, now a Linux Foundation project. It shares the rust-vmm building blocks with Firecracker but supports PCI and device passthrough. QEMU is the long-established general-purpose VMM, with a much larger attack surface. Kata Containers runs each container pod inside a VM using one of these VMMs; see <a href="#kata">the Kata section</a>.
+        <p class="here"><b>Here:</b> the likely VMM for the inference VM until Firecracker's passthrough support ships.</p></dd></div>
+    </dl>
+
+    <h3 id="channels">Guest–host channels</h3>
+    <dl>
+      <div><dt>vsock <span class="abbr">· AF_VSOCK</span></dt>
+        <dd>A socket family for host–guest communication. Addresses are <code>(CID, port)</code> pairs, not IP addresses, so there's no routing, no ARP, no DNS and no firewall to configure. The guest needs <code>CONFIG_VSOCKETS</code> and <code>CONFIG_VIRTIO_VSOCKETS</code>. Both sit under the kernel's socket layer (<code>CONFIG_NET</code>), not under TCP/IP (<code>CONFIG_INET</code>).
+        <p class="here"><b>Here:</b> that's why the guest can drop TCP/IP entirely and still reach the proxy.</p></dd></div>
+      <div><dt>CID <span class="abbr">· Context ID</span></dt>
+        <dd>vsock's address. 0 is the hypervisor, 1 is local, 2 is the host, and 3 and up are guests. <code>vm.json</code> gives the agent CID 3.</dd></div>
+      <div><dt>Hybrid vsock</dt>
+        <dd>Firecracker's version of vsock. On the host side it uses ordinary Unix sockets instead of the kernel's own vsock support (<code>vhost-vsock</code>).
+          <ul>
+            <li>Guest connects out to port N: Firecracker connects to <code>&lt;uds_path&gt;_N</code>.</li>
+            <li>Host connects in: it connects to <code>&lt;uds_path&gt;</code> and writes <code>CONNECT N\n</code>, and Firecracker replies <code>OK &lt;port&gt;\n</code>.</li>
+          </ul>
+        <p class="here"><b>Here:</b> the guest can reach only ports for which a <code>_N</code> socket file exists on the host. The set of socket files is the guest's allowlist below HTTP.</p></dd></div>
+      <div><dt>UDS <span class="abbr">· Unix domain socket</span></dt>
+        <dd>A socket at a filesystem path. Access is controlled by file permissions, the listener can read the connecting process's uid (<code>SO_PEERCRED</code>), and it never leaves the machine.</dd></div>
+      <div><dt><code>uds_8080</code></dt>
+        <dd>Shorthand for <code>&lt;uds_path&gt;_8080</code>, the host socket file that receives guest connections to port 8080. Envoy binds it as a <code>pipe</code> listener.</dd></div>
+      <div><dt>MMDS <span class="abbr">· Microvm Metadata Service</span></dt>
+        <dd>Firecracker's built-in metadata store. The host loads JSON into it through Firecracker's API, and the guest reads it over HTTP at <code>169.254.169.254</code> through a virtio network interface; Firecracker answers with its own tiny TCP/HTTP stack. Version 2 requires a session token, like AWS's IMDSv2.
+        <p class="here"><b>Why it's excluded:</b> every process in the guest can read it, so it's a config channel, not a secret store. It also needs a network card, and this design has none. Configuration goes on the read-only rootfs or comes over vsock instead.</p></dd></div>
+      <div><dt><code>169.254.169.254</code></dt>
+        <dd>The link-local address where cloud providers run their instance metadata service. On a cloud node it hands IAM credentials to anything that can reach it; that was the 2019 Capital One breach, through server-side request forgery.
+        <p class="here"><b>Here:</b> unreachable, because there's no network card.</p></dd></div>
+      <div><dt>kube API</dt>
+        <dd>The Kubernetes API server. A mounted service-account token plus a reachable API server lets an attacker act on the cluster without touching the internet.
+        <p class="here"><b>Here:</b> also unreachable.</p></dd></div>
+    </dl>
+
+    <h3 id="guest">Inside the guest</h3>
+    <dl>
+      <div><dt>Landlock</dt>
+        <dd>A Linux security module that any process, even an unprivileged one, can use to restrict itself, for example "this process may only read <code>/work</code> and write <code>/scratch</code>". Since ABI v4 it can also restrict TCP ports.</dd></div>
+      <div><dt>seccomp-bpf</dt>
+        <dd>A filter on which system calls a process may make, and with which arguments.</dd></div>
+      <div><dt>Read-only rootfs and scratch drive</dt>
+        <dd>The agent can't change its own binaries or persist anything outside a disposable second disk. Firecracker's <code>is_read_only</code> enforces this at the block device, below the guest kernel.</dd></div>
+      <div><dt>Lean kernel</dt>
+        <dd>This repo. Code that isn't compiled in can't be exploited: <code>IO_URING=n</code>, <code>USER_NS=n</code>, <code>BPF_SYSCALL=n</code>, no modules.
+        <p class="here"><b>Two profiles:</b> the default still builds TCP/IP and the virtio NIC driver, so the optional tap works; with no NIC configured, nothing leaves over IP. <code>VSOCK_ONLY=1</code> adds <code>configs/vsock-only.fragment</code>, which removes TCP/IP (<code>INET=n</code>), the NIC driver and packet sockets from the kernel.</p></dd></div>
+    </dl>
+
+    <h3 id="proxy">Proxy</h3>
+    <dl>
+      <div><dt>Envoy</dt>
+        <dd>The host-side proxy, a CNCF project written in C++. Three parts matter here:
+          <ul>
+            <li><b>Listener:</b> where traffic arrives; here a <code>pipe</code>, meaning a Unix socket.</li>
+            <li><b>Route:</b> matches path, method and headers to an upstream.</li>
+            <li><b>Cluster:</b> a named upstream with its own DNS resolution and TLS settings.</li>
+          </ul>
+        <p class="here"><b>Here:</b> the only host process that parses guest input. Jail it, and patch it on the same cadence as the guest kernel.</p></dd></div>
+      <div><dt><code>ext_authz</code></dt>
+        <dd>An Envoy HTTP filter that pauses each request and asks an external service for a decision. Over gRPC the call is <code>envoy.service.auth.v3.Authorization/Check</code>.
+          <ul>
+            <li>The request carries the source, method, path, headers, optionally the body, and <code>context_extensions</code>.</li>
+            <li>The answer is either <code>OkHttpResponse</code>, optionally with headers to set or remove (this is how the token gets added), or <code>DeniedHttpResponse</code> with a status code and body.</li>
+          </ul>
+        Open Policy Agent ships an implementation, or you write your own.</dd></div>
+      <div><dt><code>context_extensions</code></dt>
+        <dd>Static key-value pairs attached to a route in Envoy's config and passed to the policy service.
+        <p class="here"><b>Here:</b> they carry the VM and tool identity, which the guest can't forge because Envoy's config sets them.</p></dd></div>
+      <div><dt><code>failure_mode_allow</code></dt>
+        <dd>What Envoy does if the policy service is unreachable. It must be <code>false</code>, so requests fail closed.</dd></div>
+      <div><dt>SNI <span class="abbr">· Server Name Indication</span></dt>
+        <dd>The hostname a client sends in plaintext at the start of a TLS handshake. A proxy that can't decrypt traffic can only filter on this.</dd></div>
+      <div><dt>CONNECT, termination, origination</dt>
+        <dd>Three ways a proxy can handle TLS:
+          <ul>
+            <li><b>CONNECT passthrough:</b> the client asks for a raw tunnel and runs TLS through it. The proxy sees only the host name and byte counts.</li>
+            <li><b>TLS termination:</b> the client's TLS ends at the proxy, which needs a certificate the client trusts. That means planting a CA in the guest.</li>
+            <li><b>TLS origination:</b> the client speaks plain HTTP to the proxy, and the proxy opens TLS itself.</li>
+          </ul>
+        <p class="here"><b>Here:</b> origination. The proxy sees everything and no CA goes into the guest. Plain HTTP is safe because that leg is a local vsock-to-Unix-socket hop that never touches a network.</p></dd></div>
+      <div><dt>netns <span class="abbr">· network namespace</span></dt>
+        <dd>A separate copy of the network stack: interfaces, routes, firewall.
+        <p class="here"><b>Here:</b> Envoy runs in one whose only route goes upstream, and Firecracker in one with no route at all.</p></dd></div>
+    </dl>
+
+    <h3 id="credentials">Credentials</h3>
+    <dl>
+      <div><dt>Credential broker</dt>
+        <dd>A host-side service that holds long-lived secrets and issues short-lived ones. HashiCorp Vault does this with "dynamic secrets": it mints, for example, a GitHub App installation token or AWS STS credentials with a lease and revokes them when the lease ends.</dd></div>
+      <div><dt>Short-lived, scoped token</dt>
+        <dd>A GitHub App installation token is a concrete example. It expires after 1 hour, is limited to chosen repositories, and carries specific permissions (say, issues: write and nothing else). A leaked one is worth little and soon expires.</dd></div>
+      <div><dt>Workload identity</dt>
+        <dd>The platform tells a service who a workload is, instead of the workload proving it with a stored secret. SPIFFE/SPIRE is the standard toolkit.
+        <p class="here"><b>Here:</b> the per-VM socket is the identity, so the guest has nothing to steal.</p></dd></div>
+      <div><dt>Lethal trifecta</dt>
+        <dd>Private data, untrusted content, and a path out. Prompt injection needs all three. The proxy narrows the third.
+        <p class="here"><b>Limit:</b> hiding the secret stops theft, not misuse. The agent can still use a token's authority through allowed calls, so token scope and per-call policy are the real controls.</p></dd></div>
+    </dl>
+
+    <h3 id="gpu">GPU</h3>
+    <dl>
+      <div><dt>PCIe and BARs</dt>
+        <dd>The bus GPUs sit on. Each device has a configuration space and BARs (Base Address Registers, the memory windows the CPU uses to talk to the device). Devices can also do DMA.</dd></div>
+      <div><dt>DMA <span class="abbr">· Direct Memory Access</span></dt>
+        <dd>The device reads and writes system memory itself, without the CPU.
+        <p class="here"><b>The danger:</b> a GPU programmed by the guest could, with nothing in between, DMA anywhere in host memory, including the host kernel.</p></dd></div>
+      <div><dt>IOMMU <span class="abbr">· Intel VT-d, AMD-Vi</span></dt>
+        <dd>An MMU for devices. It translates the addresses a device uses into host physical addresses through per-device page tables. For a passed-through GPU those tables map only the guest's RAM, so DMA elsewhere is blocked. Enabled with <code>intel_iommu=on</code> or <code>amd_iommu=on</code>, now the default on many distros.</dd></div>
+      <div><dt>Interrupt remapping</dt>
+        <dd>Part of VT-d and AMD-Vi. Devices signal interrupts by writing to a special address (MSI). Without remapping, a guest-controlled device can write crafted MSIs and inject arbitrary interrupts into the host, as Wojtczuk and Rutkowska demonstrated in 2011. VFIO refuses to run without it unless you set <code>allow_unsafe_interrupts</code>. Never set it.</dd></div>
+      <div><dt>IOMMU group</dt>
+        <dd>The smallest set of devices the IOMMU can isolate from one another, determined by the PCIe topology. The whole group has to go to one VM. Check <code>/sys/kernel/iommu_groups/</code>.</dd></div>
+      <div><dt>ACS <span class="abbr">· Access Control Services</span></dt>
+        <dd>A PCIe feature on switches and root ports that forces device-to-device traffic up to the root complex, where the IOMMU can see it. Without ACS, two devices behind the same switch can DMA to each other directly, around the IOMMU. The "ACS override" kernel patch only pretends ACS exists; don't use it.</dd></div>
+      <div><dt>VFIO</dt>
+        <dd>The Linux framework (<code>vfio-pci</code>, and the newer <code>iommufd</code>) that hands a whole PCI device to userspace safely. The VMM uses it to:
+          <ul>
+            <li>map the device's BARs into the guest,</li>
+            <li>program the IOMMU with the guest's memory,</li>
+            <li>route the device's interrupts into the guest through KVM.</li>
+          </ul>
+        <p class="here"><b>Side effect:</b> guest memory has to be pinned, because the device may DMA into any of it at any time. That's why Firecracker's VFIO work preallocates all guest memory, and why memory overcommit and ballooning stop working.</p></dd></div>
+      <div><dt>FLR <span class="abbr">· Function Level Reset</span></dt>
+        <dd>A PCIe feature that resets one device function to its power-on state without resetting the whole bus. The fallbacks are a secondary bus reset or a power-state cycle (D3hot).
+        <p class="here"><b>Caveats:</b> a reset doesn't guarantee GPU memory is wiped, so scrub it between tenants. It doesn't undo changes to persistent firmware either. If a guest can rewrite the GPU's flash-stored VBIOS, a reset won't clean it.</p></dd></div>
+      <div><dt>vGPU, MIG, SR-IOV</dt>
+        <dd>Ways to share one GPU. vGPU is NVIDIA's time-sliced sharing, which needs a host-side NVIDIA manager driver. MIG (Multi-Instance GPU) on A100/H100 makes hardware partitions with separate compute and memory slices that still share firmware and a scheduler. SR-IOV presents one physical device as many virtual functions.
+        <p class="here"><b>Here:</b> avoided across trust domains. One dedicated GPU per trust domain.</p></dd></div>
+      <div><dt>virtio-gpu native context, gVisor nvproxy</dt>
+        <dd>Both forward the guest's GPU commands or driver calls (ioctls) to the host's GPU driver, putting a large proprietary host driver in the guest's reach. That makes them weaker than passthrough.</dd></div>
+      <div><dt>Confidential computing</dt>
+        <dd>H100s have a "CC mode" that works with AMD SEV-SNP or Intel TDX VMs and encrypts traffic between the VM and the GPU. It protects the model from a compromised host, which is the opposite direction from this design's concern.</dd></div>
+    </dl>
+  </section>
+
+  <section id="gaps">
+    <h2>Gaps this walkthrough exposes</h2>
+    <ol class="gaps">
+      <li><b>The relay into the inference VM needs a shim.</b> Opening a connection into a hybrid-vsock guest means writing <code>CONNECT N\n</code> first. Envoy can't send that preamble and doesn't speak <code>AF_VSOCK</code>, so it needs a small relay, or the inference VM opens the connection out to a host listener. Check whether Cloud Hypervisor uses the same Firecracker-compatible protocol.</li>
+      <li><b>The guest's TCP/IP stack stays unless tools stop using TCP.</b> The loopback TCP shim needs <code>CONFIG_INET</code>. Tools that open vsock directly, or go through the Unix-socket shim, can run on the vsock-only profile, which has no TCP/IP. Test the agent harness on it before switching.</li>
+      <li><b>The socket files are the guest's port allowlist.</b> Create only <code>_8080</code> for each agent VM, and give each socket permissions that let only that VM's jailer uid connect.</li>
+      <li><b>VFIO pins guest memory,</b> so inference VMs can't be packed by overcommitting RAM. Size them for the whole model.</li>
+    </ol>
+  </section>
+
+  <section id="kata">
+    <h2>Kata Containers instead of raw Firecracker?</h2>
+    <p>Kata is a container runtime that starts each Kubernetes pod inside its own VM. It plugs into containerd as <code>io.containerd.kata.v2</code> and is selected with a <code>RuntimeClass</code>. Inside the VM, a small Rust program (<code>kata-agent</code>) receives commands from the host runtime over vsock and starts the containers. The VMM is configurable: QEMU (the default), Cloud Hypervisor, Firecracker, or Dragonball, which is built into the newer Rust runtime.</p>
+    <p>It's the same isolation class as this design, because a hardware VM boundary and a separate guest kernel come either way. What changes is how much host-side code sits next to that boundary.</p>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Aspect</th><th>This design (raw Firecracker)</th><th>Kata Containers</th></tr></thead>
+        <tbody>
+          <tr><td>Orchestration</td><td>Your scripts.</td><td>Kubernetes-native. Existing pod specs work with <code>runtimeClassName</code>.</td></tr>
+          <tr><td>Guest network</td><td>None. vsock only.</td><td>A NIC bridged from the pod's network namespace, so the egress pod and NetworkPolicy from the original reading apply outside the VM.</td></tr>
+          <tr><td>Host code the guest reaches</td><td>Firecracker devices and Envoy.</td><td>The VMM, the shim and kata-runtime, and with QEMU or Cloud Hypervisor, <code>virtiofsd</code> for the shared filesystem.</td></tr>
+          <tr><td>Guest kernel</td><td>This repo's lean kernel.</td><td>Kata's own minimal kernel, or a custom one via config. Needs what kata-agent requires (cgroups, namespaces, and PCI/ACPI hotplug for QEMU and Cloud Hypervisor), so the lean kernel won't drop in unchanged.</td></tr>
+          <tr><td>GPU</td><td>Hand-built inference VM.</td><td>NVIDIA's GPU Operator has a Kata path with VFIO passthrough (<code>kata-qemu-nvidia-gpu</code>, QEMU-based). One GPU per pod; no multi-GPU or vGPU. Parts are marked Technology Preview.</td></tr>
+          <tr><td>Credentials</td><td>Never in the guest.</td><td>The same rule applies. Kubernetes Secrets and service-account tokens mounted into the pod enter the guest, so don't mount them (<code>automountServiceAccountToken: false</code>). Inject at the egress pod.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p><b>Track record.</b> Kata escapes have come through the host-side components that trust guest or pod input, not through KVM:</p>
+    <ul class="plain">
+      <li>2020, Unit 42 (Black Hat USA): CVE-2020-2023 let a container reach the guest's root filesystem device and impersonate kata-agent. CVE-2020-2026 let a guest trick kata-runtime into mounting the container image on any host path.</li>
+      <li>2026, as reported by CVE trackers (confirm against NVD and the Kata advisories): CVE-2026-47243, a guest-root to host-root escape through virtio-fs in runtime-rs, and CVE-2026-44210, a VM escape through <code>virtiofsd</code> argument injection via a default-enabled pod annotation.</li>
+    </ul>
+    <div class="verdict">
+      <p><b>Verdict.</b> Kata is a sound replacement for running the microVM layer if the agents land in Kubernetes, but it isn't safer by default. It brings back the egress-pod design from the original reading, and it's the best-maintained GPU path. Configure it down:</p>
+      <ul class="plain">
+        <li>Use the Firecracker or Cloud Hypervisor VMM, not QEMU, except on GPU nodes.</li>
+        <li>Avoid virtio-fs where you can; with Firecracker, Kata uses block devices (the devmapper snapshotter) instead.</li>
+        <li>Restrict which pod annotations the runtime accepts.</li>
+        <li>Run agent pods on dedicated nodes, and don't mount any Kubernetes credentials.</li>
+        <li>Patch Kata on the same cadence as the kernel.</li>
+      </ul>
+      <p>If the agents don't run on Kubernetes, raw Firecracker with the jailer is the smaller host surface. Keep it.</p>
+    </div>
+  </section>
+
+  <section class="sources">
+    <b>Sources for the Kata section</b>
+    <ul>
+      <li><a href="https://cloudnativenow.com/topics/container-security/palo-alto-networks-discloses-kata-container-flaws">Palo Alto Networks discloses Kata Container flaws (Cloud Native Now)</a></li>
+      <li><a href="https://attackerkb.com/topics/tdOp5DtPhl/cve-2020-2023">CVE-2020-2023 (AttackerKB)</a></li>
+      <li><a href="https://avd.aquasec.com/nvd/2020/cve-2020-2026">CVE-2020-2026 (Aqua AVD)</a></li>
+      <li><a href="https://nvd.nist.gov/vuln/detail/CVE-2026-47243">CVE-2026-47243 (NVD)</a></li>
+      <li><a href="https://vulert.com/vuln-db/kata-containers-have-vm-escape-via-virtiofsd-argument-injection-through-default-enabled-pod-annotati-">CVE-2026-44210 (Vulert)</a></li>
+      <li><a href="https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/gpu-operator-kata.html">GPU Operator with Kata Containers (NVIDIA)</a></li>
+      <li><a href="https://northflank.com/blog/guide-to-cloud-hypervisor">Guide to Cloud Hypervisor (Northflank)</a></li>
+    </ul>
+  </section>
+</main>

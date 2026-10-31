@@ -1,0 +1,9 @@
+# Pinned versions. Bump here, then: make deps fetch config build check
+KERNEL_SERIES=6.18
+KERNEL_VERSION=6.18.58
+KERNEL_URL=https://cdn.kernel.org/pub/linux/kernel/v6.x
+FIRECRACKER_VERSION=v1.17.0
+FIRECRACKER_SHA256=06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558
+BASE_CONFIG=configs/base-firecracker-x86_64-6.18.config
+BASE_CONFIG_SRC=https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/resources/guest_configs/microvm-kernel-ci-x86_64-6.18.config
+BASE_CONFIG_FETCHED=2026-10-23

@@ -1,0 +1,20 @@
+# vsock-only.fragment: applied after lean.fragment when VSOCK_ONLY=1.
+# The guest's only channel out is AF_VSOCK to the host proxy (CID 2). No IP at all.
+# Tools must open vsock themselves, or go through an AF_UNIX -> vsock shim in the guest
+# (socat UNIX-LISTEN:/run/egress.sock,fork VSOCK-CONNECT:2:8080). A loopback TCP shim
+# needs CONFIG_INET and does not work with this profile.
+# Costs: the tap mode in HOWTO §7 (NET=1) is gone, and guest software that creates an
+# AF_INET socket gets EAFNOSUPPORT.
+
+# No TCP/IP: no TCP, UDP, ICMP, routing or IPv4 sockets in the guest kernel.
+# CONFIG_INET is not set
+
+# No NIC driver, and no raw packet sockets (AF_PACKET has its own LPE history) with nothing to send on.
+# CONFIG_VIRTIO_NET is not set
+# CONFIG_PACKET is not set
+
+# What stays: the socket layer, Unix sockets and vsock.
+CONFIG_NET=y
+CONFIG_UNIX=y
+CONFIG_VSOCKETS=y
+CONFIG_VIRTIO_VSOCKETS=y

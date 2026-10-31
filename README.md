@@ -1,0 +1,80 @@
+# lean-kernel
+
+A minimal, hardened Linux guest kernel for running untrusted AI agents in Firecracker microVMs, one VM per agent.
+
+The point: an agent that processes attacker-controlled content should not share a kernel with the host. Landlock + seccomp + an egress proxy bound what a compromised *process* can do; they are all enforced by the kernel and do not survive a kernel privilege-escalation bug. A separate, tiny guest kernel turns a kernel escape into a VM escape, a much rarer bug class, and a guest kernel with 40 drivers instead of 4,000 carries fewer of the bugs in the first place.
+
+## Read next
+
+- `HOWTO.md`: step by step from here to a booted guest, expected outputs, troubleshooting, cadence, what comes after.
+- `NOTES.md`: why a separate kernel, what every cut and hardening option buys, honest limits, open questions.
+
+## Layout
+
+```
+VERSION                  pinned kernel, Firecracker, and base-config versions
+HOWTO.md                 the procedure; NOTES.md the reasoning
+configs/
+  base-firecracker-x86_64-6.18.config   Firecracker's reference microvm config (upstream, unmodified)
+  lean.fragment          the cuts and the gcc-safe hardening, applied on top of base
+  llvm.fragment          CFI + RANDSTRUCT + KSTACK_ERASE, applied to the default clang build
+  vsock-only.fragment    no TCP/IP, no NIC driver, no AF_PACKET; applied only with VSOCK_ONLY=1
+scripts/
+  deps-check.sh          what's missing on this host
+  fetch-kernel.sh        download + verify the pinned longterm tarball into work/
+  configure.sh           base + fragment(s) -> out/.config, then PROVE every fragment line stuck
+  build.sh               make bzImage -> out/bzImage (bzImage, so KASLR applies)
+  check.sh               run kernel-hardening-checker (KSPP) against out/.config
+  mkrootfs.sh            tiny busybox ext4 root image, no root privileges needed
+  run.sh                 boot it in Firecracker (serial console on this terminal)
+  test.sh                boot headless with tests/probe.c as init; fail unless every wall holds
+  syscalls.sh, .py       which syscalls the built vmlinux has (static, no boot)
+  net-tap.sh             optional host tap for guest networking (needs sudo)
+tests/probe.c            in-guest probe: tries every cut as root, as a user, and under jail-exec
+guest/jail-exec.c        in-guest launcher: drop to the agent uid, no_new_privs, seccomp, exec
+vm/vm.json.in            Firecracker config template
+bin/                     Firecracker release binaries (gitignored, fetched by deps-check)
+work/                    kernel source + build tree (gitignored)
+out/                     bzImage, vmlinux + System.map, .config, rootfs image (gitignored)
+```
+
+## Workflow
+
+```sh
+make deps      # lists missing packages; prints the apt line
+make fetch     # kernel tarball, sha256 verified against kernel.org
+make config    # merge base + lean.fragment, fail if any option was dropped by a dependency
+make build     # clang build (the default); LLVM=0 make build for gcc, without CFI/RANDSTRUCT/KSTACK_ERASE
+make check     # KSPP hardening checker, shows only failures
+make rootfs    # 64 MB busybox ext4 image with a serial-console shell
+make syscalls  # lists present and compiled-out syscalls from out/vmlinux
+make test      # boots the probe guest headless; fails if any cut or hardening check doesn't hold
+make run       # boots in Firecracker; ctrl-a x does nothing here, use `reboot -f` (exits Firecracker; `poweroff -f` only halts)
+```
+
+`make config` is the step that matters. `merge_config.sh` silently lets Kconfig dependencies override a fragment line; `configure.sh` re-reads the fragment afterwards and refuses to continue if any `=y` didn't take or any `is not set` came back as built-in. A cut that didn't happen is a false sense of security.
+
+## What gets cut (see `configs/lean.fragment` for the full list)
+
+Modules (none; everything built in, no LKM rootkits), io_uring, user namespaces, BPF syscall, netfilter, kexec, /dev/mem, debugfs, 32-bit syscall table, legacy vsyscall, ptys, FUSE/NFS/CIFS/9p, USB, sound, graphics, wireless, kprobes/ftrace/perf, staging drivers. With `VSOCK_ONLY=1`, also TCP/IP, the virtio NIC driver and packet sockets: the guest's only channel out is vsock. Kept: virtio block/net/console/vsock/rng (net only in the default profile), ext4, serial console, seccomp, Landlock, Yama, lockdown.
+
+## Threat model, stated plainly
+
+- Defends: a compromised agent process reaching kernel code that isn't there, and exploit mitigations against the code that is.
+- Does not defend: bugs in the virtio devices or KVM itself (host side), or the host kernel's own LPE surface. Patch the host on its distro cadence; this repo is for the guest only.
+- Not a general-purpose kernel. Every option kept "in case" is a bug you chose to carry.
+
+## Cadence (the real cost)
+
+The pinned kernel is a **longterm** series. You now own its patch cadence for this guest:
+
+1. Weekly: `scripts/fetch-kernel.sh --check` compares `VERSION` to kernel.org's current longterm for the series.
+2. On a new point release: bump `VERSION`, `make fetch config build check`, boot test, commit the `.config` diff.
+3. Firecracker releases: bump `VERSION`, `make deps` re-fetches and verifies the sha256.
+
+## References
+
+- Firecracker guest configs: https://github.com/firecracker-microvm/firecracker/tree/main/resources/guest_configs
+- Firecracker getting started: https://github.com/firecracker-microvm/firecracker/blob/main/docs/getting-started.md
+- KSPP recommended settings: https://kspp.github.io/Recommended_Settings
+- kernel-hardening-checker: https://github.com/a13xp0p0v/kernel-hardening-checker

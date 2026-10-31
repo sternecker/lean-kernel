@@ -1,0 +1,237 @@
+# lean.fragment: applied on top of configs/base-firecracker-x86_64-6.18.config.
+# Kconfig fragment syntax: "CONFIG_X=y" or "# CONFIG_X is not set".
+# scripts/configure.sh verifies every line below survived dependency resolution.
+#
+# Two sections: CUTS remove code the guest can reach; HARDEN makes what's left harder to exploit.
+# Anything commented with "(llvm)" lives in llvm.fragment instead.
+
+# ===================== CUTS: attack surface =====================
+
+# No loadable modules: everything built in, nothing to load, no LKM rootkits, no signing to manage.
+# CONFIG_MODULES is not set
+
+# Interfaces behind most 2026 public LPE PoCs.
+# CONFIG_IO_URING is not set
+# CONFIG_USER_NS is not set
+# CONFIG_BPF_SYSCALL is not set
+# CONFIG_BPF_JIT is not set
+# CONFIG_KPROBES is not set
+# CONFIG_UPROBES is not set
+# CONFIG_FTRACE is not set
+# CONFIG_PROFILING is not set
+
+# The guest does not firewall; the egress pod outside the VM does.
+# CONFIG_NETFILTER is not set
+# CONFIG_NF_TABLES is not set
+# CONFIG_BRIDGE is not set
+# CONFIG_VLAN_8021Q is not set
+# CONFIG_NET_SCHED is not set
+# CONFIG_IPV6 is not set
+# CONFIG_MPTCP is not set
+# CONFIG_INET_DIAG is not set
+# No IPsec, tun/tap, raw packet sockets or packet labelling in the guest: XFRM and AF_PACKET carry LPE history.
+# CONFIG_XFRM is not set
+# CONFIG_XFRM_USER is not set
+# CONFIG_TUN is not set
+# CONFIG_PACKET is not set
+# CONFIG_UNIX_DIAG is not set
+# CONFIG_NETLABEL is not set
+
+# No way to replace or read the running kernel.
+# CONFIG_KEXEC is not set
+# CONFIG_KEXEC_FILE is not set
+# CONFIG_CRASH_DUMP is not set
+# CONFIG_DEVMEM is not set
+# CONFIG_DEVPORT is not set
+# CONFIG_PROC_KCORE is not set
+# CONFIG_PROC_VMCORE is not set
+# CONFIG_DEBUG_FS is not set
+# CONFIG_HIBERNATION is not set
+# CONFIG_X86_IOPL_IOPERM is not set
+# CONFIG_MODIFY_LDT_SYSCALL is not set
+# CONFIG_X86_MSR is not set
+# CONFIG_X86_CPUID is not set
+# CONFIG_PROC_PAGE_MONITOR is not set
+# CONFIG_MAGIC_SYSRQ is not set
+# CONFIG_COREDUMP is not set
+
+# Exploit primitives and process-introspection syscalls an agent doesn't need.
+# CONFIG_USERFAULTFD is not set
+# CONFIG_KCMP is not set
+# CONFIG_CHECKPOINT_RESTORE is not set
+# CONFIG_KSM is not set
+# CONFIG_TASKSTATS is not set
+# Heap-spray and LPE primitives with no use in an agent guest: SysV msg_msg, POSIX mqueues, keyrings.
+# NUMA: single-node VM, so mbind/set_mempolicy/migrate_pages/move_pages are only attack surface.
+# CONFIG_SYSVIPC is not set
+# CONFIG_POSIX_MQUEUE is not set
+# CONFIG_KEYS is not set
+# CONFIG_NUMA is not set
+# Root-only host administration a guest never does: disk quotas, swap (takes zswap), process accounting.
+# CONFIG_QUOTA is not set
+# CONFIG_SWAP is not set
+# CONFIG_BSD_PROCESS_ACCT is not set
+# CONFIG_AIO is not set
+# CONFIG_RSEQ is not set
+# No in-kernel symbol table. Decode an oops on the host: subtract the "Kernel Offset" the panic prints,
+# then look the address up in out/System.map.
+# CONFIG_KALLSYMS is not set
+
+# One syscall table. No 32-bit, no x32, no legacy vsyscall page.
+# CONFIG_IA32_EMULATION is not set
+# CONFIG_X86_X32_ABI is not set
+CONFIG_LEGACY_VSYSCALL_NONE=y
+# CONFIG_COMPAT_VDSO is not set
+# CONFIG_USELIB is not set
+# CONFIG_SYSFS_SYSCALL is not set
+# CONFIG_LEGACY_PTYS is not set
+# CONFIG_BINFMT_MISC is not set
+# CONFIG_LDISC_AUTOLOAD is not set
+
+# Filesystems: ext4 root only. No network or userspace filesystems.
+CONFIG_EXT4_FS=y
+# CONFIG_FUSE_FS is not set
+# CONFIG_NFS_FS is not set
+# CONFIG_NFSD is not set
+# CONFIG_CIFS is not set
+# CONFIG_SMB_SERVER is not set
+# CONFIG_NETWORK_FILESYSTEMS is not set
+# CONFIG_9P_FS is not set
+# CONFIG_BTRFS_FS is not set
+# CONFIG_XFS_FS is not set
+# CONFIG_F2FS_FS is not set
+# CONFIG_VFAT_FS is not set
+# CONFIG_ISO9660_FS is not set
+# CONFIG_SQUASHFS is not set
+# CONFIG_OVERLAY_FS is not set
+# CONFIG_AUTOFS_FS is not set
+# CONFIG_HUGETLBFS is not set
+# CONFIG_FS_ENCRYPTION is not set
+# CONFIG_ENCRYPTED_KEYS is not set
+
+# Devices: virtio over MMIO only, serial console, nothing physical.
+CONFIG_VIRTIO=y
+CONFIG_VIRTIO_MMIO=y
+CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y
+CONFIG_VIRTIO_BLK=y
+CONFIG_VIRTIO_NET=y
+CONFIG_VIRTIO_CONSOLE=y
+CONFIG_VSOCKETS=y
+CONFIG_VIRTIO_VSOCKETS=y
+CONFIG_HW_RANDOM=y
+CONFIG_HW_RANDOM_VIRTIO=y
+CONFIG_SERIAL_8250=y
+CONFIG_SERIAL_8250_CONSOLE=y
+CONFIG_DEVTMPFS=y
+CONFIG_DEVTMPFS_MOUNT=y
+# CONFIG_PCI is not set
+# Root is virtio-blk: no SCSI/iSCSI stack, no SG passthrough, no loop devices for root-built images.
+# CONFIG_SCSI is not set
+# CONFIG_ISCSI_TCP is not set
+# CONFIG_BLK_DEV_BSGLIB is not set
+# CONFIG_BLK_DEV_LOOP is not set
+# CONFIG_IOSCHED_BFQ is not set
+# CONFIG_MQ_IOSCHED_KYBER is not set
+# CONFIG_SCHED_MC_PRIO is not set
+# CONFIG_CPU_FREQ is not set
+# CONFIG_THERMAL is not set
+# CONFIG_PTP_1588_CLOCK is not set
+# CONFIG_PPS is not set
+# CONFIG_USB_SUPPORT is not set
+# CONFIG_SOUND is not set
+# CONFIG_DRM is not set
+# CONFIG_FB is not set
+# CONFIG_VT is not set
+# CONFIG_INPUT is not set
+# CONFIG_WLAN is not set
+# CONFIG_WIRELESS is not set
+# CONFIG_BT is not set
+# CONFIG_NFC is not set
+# CONFIG_STAGING is not set
+# CONFIG_ACPI is not set
+# HOTPLUG_CPU stays on: on x86 it is def_bool y whenever SMP is set (no prompt).
+# CONFIG_MEMORY_HOTPLUG is not set
+# CONFIG_KVM is not set
+# CONFIG_VIRTUALIZATION is not set
+
+# ===================== HARDEN: exploit mitigations (gcc-safe) =====================
+
+# Memory layout and W^X.
+CONFIG_RANDOMIZE_BASE=y
+CONFIG_RANDOMIZE_MEMORY=y
+CONFIG_RANDOMIZE_KSTACK_OFFSET_DEFAULT=y
+CONFIG_STRICT_KERNEL_RWX=y
+CONFIG_DEBUG_WX=y
+CONFIG_VMAP_STACK=y
+CONFIG_STACKPROTECTOR=y
+CONFIG_STACKPROTECTOR_STRONG=y
+CONFIG_SCHED_STACK_END_CHECK=y
+CONFIG_DEFAULT_MMAP_MIN_ADDR=65536
+CONFIG_ARCH_MMAP_RND_BITS=32
+CONFIG_PROC_MEM_NO_FORCE=y
+CONFIG_PAGE_TABLE_CHECK=y
+CONFIG_PAGE_TABLE_CHECK_ENFORCED=y
+
+# Heap.
+CONFIG_SLAB_FREELIST_HARDENED=y
+CONFIG_SLAB_FREELIST_RANDOM=y
+CONFIG_RANDOM_KMALLOC_CACHES=y
+CONFIG_SLAB_BUCKETS=y
+CONFIG_KFENCE=y
+CONFIG_KFENCE_SAMPLE_INTERVAL=100
+CONFIG_SHUFFLE_PAGE_ALLOCATOR=y
+CONFIG_INIT_ON_ALLOC_DEFAULT_ON=y
+CONFIG_INIT_ON_FREE_DEFAULT_ON=y
+CONFIG_INIT_STACK_ALL_ZERO=y
+CONFIG_ZERO_CALL_USED_REGS=y
+# CONFIG_SLAB_MERGE_DEFAULT is not set
+
+# Copy and bounds checks.
+CONFIG_HARDENED_USERCOPY=y
+CONFIG_HARDENED_USERCOPY_DEFAULT_ON=y
+CONFIG_FORTIFY_SOURCE=y
+# UBSAN traps, and PANIC_ON_OOPS turns a trap into a panic: bounds only, not the noisy bool/enum checks.
+CONFIG_UBSAN=y
+CONFIG_UBSAN_BOUNDS=y
+CONFIG_UBSAN_TRAP=y
+# CONFIG_UBSAN_BOOL is not set
+# CONFIG_UBSAN_ENUM is not set
+CONFIG_BUG_ON_DATA_CORRUPTION=y
+CONFIG_LIST_HARDENED=y
+CONFIG_DEBUG_LIST=y
+CONFIG_DEBUG_SG=y
+CONFIG_DEBUG_NOTIFIERS=y
+CONFIG_DEBUG_VIRTUAL=y
+
+# CPU-side mitigations and control-flow protection (hardware CET where the host exposes it).
+CONFIG_CPU_MITIGATIONS=y
+CONFIG_MITIGATION_PAGE_TABLE_ISOLATION=y
+CONFIG_MITIGATION_RETPOLINE=y
+CONFIG_MITIGATION_SLS=y
+CONFIG_MITIGATION_CALL_DEPTH_TRACKING=y
+CONFIG_SCHED_CORE=y
+CONFIG_IOMMU_DEFAULT_DMA_STRICT=y
+CONFIG_X86_UMIP=y
+CONFIG_X86_KERNEL_IBT=y
+CONFIG_X86_USER_SHADOW_STACK=y
+
+# Fail closed.
+CONFIG_PANIC_ON_OOPS=y
+CONFIG_PANIC_TIMEOUT=-1
+# CONFIG_SLUB_DEBUG_ON is not set
+
+# LSMs: the sandbox stack still runs inside the guest.
+CONFIG_SECURITY=y
+CONFIG_SECCOMP=y
+CONFIG_SECCOMP_FILTER=y
+CONFIG_SECURITY_LANDLOCK=y
+CONFIG_SECURITY_YAMA=y
+CONFIG_SECURITY_LOCKDOWN_LSM=y
+CONFIG_SECURITY_LOCKDOWN_LSM_EARLY=y
+# SELinux came in with the base config but isn't in CONFIG_LSM: dead code with a boot-time switch.
+# CONFIG_SECURITY_SELINUX is not set
+CONFIG_LOCK_DOWN_KERNEL_FORCE_CONFIDENTIALITY=y
+CONFIG_SECURITY_DMESG_RESTRICT=y
+CONFIG_LSM="landlock,lockdown,yama"
+CONFIG_STATIC_USERMODEHELPER=y
+CONFIG_STATIC_USERMODEHELPER_PATH=""

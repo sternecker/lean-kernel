@@ -1,0 +1,10 @@
+bin/
+work/
+out/
+rootfs/
+*.ext4
+*.img
+*.log
+vm/vm.json
+/firecracker.sock
+/vsock.sock

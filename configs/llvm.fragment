@@ -1,0 +1,12 @@
+# llvm.fragment: applied to the default clang + lld build (skipped with LLVM=0).
+# Forward-edge CFI, struct layout randomization and clang-side stack erasing.
+CONFIG_CFI=y
+# CONFIG_CFI_PERMISSIVE is not set
+# Boot with kCFI, not FineIBT (KSPP recommendation: FineIBT is the faster, weaker scheme).
+# CONFIG_CFI_AUTO_DEFAULT is not set
+CONFIG_RANDSTRUCT_FULL=y
+CONFIG_LTO_CLANG_THIN=y
+# Kernel stack poisoned on syscall return (clang's stack-depth callback; with gcc it needs plugins).
+CONFIG_KSTACK_ERASE=y
+# CONFIG_KSTACK_ERASE_METRICS is not set
+# CONFIG_KSTACK_ERASE_RUNTIME_DISABLE is not set

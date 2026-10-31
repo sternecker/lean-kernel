@@ -1,0 +1,224 @@
+<title>Agent Sandbox Architecture</title>
+<meta name="viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: one engineering sheet. Header, the diagram as the centerpiece, then the boundary table and open items. */
+:root {
+  --bg: #f6f7f8;
+  --panel: #ffffff;
+  --fg: #1b2026;
+  --muted: #5b6672;
+  --line: #c9d0d7;
+  --token: #b4690e;      /* credential path */
+  --blocked: #c0392b;    /* removed paths */
+  --vm: #eef3f8;
+  --gpu: #f3eefa;
+  --display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #12161b; --panel: #1a2027; --fg: #e3e8ee; --muted: #9aa6b2; --line: #39434e;
+    --token: #e6a04a; --blocked: #ef6a5a; --vm: #1c2631; --gpu: #251f31; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #12161b; --panel: #1a2027; --fg: #e3e8ee; --muted: #9aa6b2; --line: #39434e;
+  --token: #e6a04a; --blocked: #ef6a5a; --vm: #1c2631; --gpu: #251f31; color-scheme: dark;
+}
+body {
+  background: var(--bg); color: var(--fg); font-family: var(--body); font-size: 15px; line-height: 1.55;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 32px 56px;
+}
+main { max-width: 1040px; margin: 0 auto; display: grid; gap: 32px; }
+header { display: grid; gap: 8px; }
+.eyebrow { font-family: var(--mono); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+h1 { font-family: var(--display); font-weight: 600; font-size: 32px; line-height: 1.15; margin: 0; text-wrap: balance; }
+h2 { font-family: var(--display); font-weight: 600; font-size: 21px; margin: 0 0 12px; text-wrap: balance; }
+p { margin: 0; max-width: 68ch; }
+.lede { color: var(--muted); }
+code { font-family: var(--mono); font-size: .9em; }
+
+figure { margin: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; display: grid; gap: 12px; }
+.scroll { overflow-x: auto; }
+svg.arch { display: block; width: 100%; min-width: 880px; height: auto; color: var(--fg); }
+figcaption { font-size: 14px; color: var(--muted); max-width: 80ch; }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 20px; font-size: 13px; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 8px; }
+.legend i { display: inline-block; width: 28px; height: 0; border-top: 2px solid var(--fg); }
+.legend i.tok { border-top-color: var(--token); }
+.legend i.blk { border-top: 2px dashed var(--blocked); }
+
+/* SVG classes, themed through the tokens above */
+.arch text { fill: currentColor; font-family: var(--body); font-size: 12px; }
+.arch .t { font-family: var(--display); font-weight: 600; font-size: 15px; }
+.arch .m { font-family: var(--mono); font-size: 11px; fill: var(--muted); }
+.arch .mu { fill: var(--muted); }
+.arch .cap { font-family: var(--mono); font-size: 11px; letter-spacing: .06em; fill: var(--muted); }
+.arch .host { fill: none; stroke: var(--line); stroke-width: 1.5; stroke-dasharray: 6 5; }
+.arch .jail { fill: none; stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 4; }
+.arch .vm { fill: var(--vm); stroke: currentColor; stroke-width: 1.25; }
+.arch .gpu { fill: var(--gpu); stroke: currentColor; stroke-width: 1.25; }
+.arch .box { fill: var(--panel); stroke: currentColor; stroke-width: 1.25; }
+.arch .ext { fill: var(--bg); stroke: currentColor; stroke-width: 1.25; }
+.arch .flow { fill: none; stroke: currentColor; stroke-width: 1.5; }
+.arch .tok { fill: none; stroke: var(--token); stroke-width: 2; }
+.arch .tokt { fill: var(--token); font-family: var(--mono); font-size: 11px; }
+.arch .blk { fill: none; stroke: var(--blocked); stroke-width: 1.75; stroke-dasharray: 5 4; }
+.arch .blkx { stroke: var(--blocked); stroke-width: 2.5; }
+.arch .blkt { fill: var(--blocked); font-family: var(--mono); font-size: 11px; }
+.arch .head { fill: currentColor; }
+.arch .headtok { fill: var(--token); }
+
+table { width: 100%; border-collapse: collapse; font-size: 14px; min-width: 560px; }
+th, td { text-align: left; vertical-align: top; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+th { font-family: var(--mono); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 500; }
+td:first-child { font-weight: 600; white-space: nowrap; }
+ul { margin: 0; padding-left: 20px; display: grid; gap: 6px; max-width: 72ch; }
+</style>
+
+<main>
+  <header>
+    <div class="eyebrow">lean-kernel · design · 2026-10-30</div>
+    <h1>Agent Sandbox Architecture</h1>
+    <p class="lede">An agent with no separate gateway pod. The VM boundary plus one jailed host-side proxy does the gateway's job. The agent guest holds no credentials and has no network. The GPU sits in a separate inference VM.</p>
+  </header>
+
+  <figure>
+    <div class="scroll">
+      <svg class="arch" viewBox="0 0 1000 650" role="img" aria-label="The agent microVM has no NIC and no credentials. Its only way out is vsock to a jailed host proxy, which injects short-lived tokens from a credential broker, enforces per-tool policy, relays inference calls to a separate GPU microVM, and holds irreversible actions for human approval.">
+        <defs>
+          <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head" d="M0,0 L10,5 L0,10 z"/></marker>
+          <marker id="aht" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="headtok" d="M0,0 L10,5 L0,10 z"/></marker>
+        </defs>
+
+        <!-- removed path: agent straight out -->
+        <line class="blk" x1="175" y1="90" x2="175" y2="22"/>
+        <line class="blkx" x1="167" y1="30" x2="183" y2="46"/>
+        <line class="blkx" x1="183" y1="30" x2="167" y2="46"/>
+        <text class="blkt" x="192" y="28">no direct route out: no NIC, no DNS,</text>
+        <text class="blkt" x="192" y="43">no 169.254.169.254, no kube API</text>
+
+        <!-- host -->
+        <rect class="host" x="20" y="56" width="760" height="580" rx="10"/>
+        <text class="cap" x="36" y="76">HOST NODE · KVM</text>
+
+        <!-- agent VM inside Firecracker jail -->
+        <rect class="jail" x="40" y="90" width="270" height="250" rx="6"/>
+        <text class="m" x="52" y="108">Firecracker + jailer · no net route</text>
+        <rect class="vm" x="56" y="120" width="238" height="204" rx="8"/>
+        <text class="t" x="72" y="146">Agent microVM</text>
+        <text class="m" x="72" y="164">lean-kernel guest</text>
+        <text x="72" y="192">agent harness + tools</text>
+        <text x="72" y="212">Landlock + seccomp</text>
+        <text x="72" y="232">read-only rootfs + scratch</text>
+        <text x="72" y="252">no NIC (vsock-only: no TCP/IP)</text>
+        <text x="72" y="272">no credentials, no MMDS secrets</text>
+        <text class="mu" x="72" y="300">vsock CID 3</text>
+
+        <!-- agent -> proxy -->
+        <line class="flow" x1="294" y1="204" x2="398" y2="204" marker-end="url(#ah)"/>
+        <text class="m" x="347" y="194" text-anchor="middle">vsock :8080</text>
+        <text class="m" x="347" y="222" text-anchor="middle">tool calls</text>
+        <text class="m" x="347" y="236" text-anchor="middle">plain HTTP</text>
+
+        <!-- proxy -->
+        <rect class="box" x="400" y="110" width="250" height="230" rx="8"/>
+        <text class="t" x="416" y="136">Egress + credential proxy</text>
+        <text class="m" x="416" y="154">Envoy on uds_8080 + ext_authz</text>
+        <text class="mu" x="416" y="172">own uid · own netns · seccomp</text>
+        <text x="416" y="200">owns DNS</text>
+        <text x="416" y="220">destination allowlist</text>
+        <text x="416" y="240">per-tool method / path / size</text>
+        <text x="416" y="260">rate limits + audit log</text>
+        <text x="416" y="280">TLS originated here</text>
+        <text class="mu" x="416" y="308">which VM = which socket</text>
+
+        <!-- proxy -> upstream (token path) -->
+        <line class="tok" x1="650" y1="166" x2="828" y2="166" marker-end="url(#aht)"/>
+        <text class="tokt" x="740" y="156" text-anchor="middle">TLS + injected token</text>
+
+        <rect class="ext" x="830" y="120" width="150" height="100" rx="8"/>
+        <text class="t" x="846" y="146">Allowlisted</text>
+        <text class="t" x="846" y="164">upstreams</text>
+        <text class="m" x="846" y="188">model API, GitHub,</text>
+        <text class="m" x="846" y="203">object storage</text>
+
+        <!-- proxy -> human approval -->
+        <line class="flow" x1="650" y1="300" x2="828" y2="300" marker-end="url(#ah)"/>
+        <text class="m" x="740" y="290" text-anchor="middle">held for approval</text>
+        <rect class="ext" x="830" y="268" width="150" height="66" rx="8"/>
+        <text class="t" x="846" y="294">Human approval</text>
+        <text class="mu" x="846" y="316">irreversible actions</text>
+
+        <!-- broker -> proxy (token path) -->
+        <rect class="box" x="470" y="400" width="180" height="84" rx="8"/>
+        <text class="t" x="486" y="426">Credential broker</text>
+        <text class="m" x="486" y="444">Vault / workload identity</text>
+        <text class="mu" x="486" y="466">per session, revoked</text>
+        <text class="mu" x="486" y="480" dy="-1">at VM teardown</text>
+        <line class="tok" x1="560" y1="400" x2="560" y2="342" marker-end="url(#aht)"/>
+        <text class="tokt" x="570" y="368">short-lived</text>
+        <text class="tokt" x="570" y="382">scoped token</text>
+
+        <!-- proxy -> inference relay -->
+        <polyline class="flow" points="430,340 430,470 296,470" marker-end="url(#ah)"/>
+        <text class="m" x="362" y="460" text-anchor="middle">vsock relay</text>
+        <text class="m" x="362" y="488" text-anchor="middle">inference API only</text>
+
+        <!-- inference VM -->
+        <rect class="jail" x="40" y="390" width="270" height="150" rx="6"/>
+        <text class="m" x="52" y="408">Cloud Hypervisor / QEMU · VFIO</text>
+        <rect class="vm" x="56" y="420" width="238" height="106" rx="8"/>
+        <text class="t" x="72" y="446">Inference microVM</text>
+        <text class="m" x="72" y="464">separate kernel profile</text>
+        <text x="72" y="490">PCI + vendor GPU driver</text>
+        <text x="72" y="510">no NIC · no creds · weights only</text>
+
+        <!-- GPU -->
+        <line class="flow" x1="175" y1="566" x2="175" y2="528" marker-start="url(#ah)" marker-end="url(#ah)"/>
+        <text class="m" x="186" y="556">VFIO · IOMMU + IRQ remap</text>
+        <rect class="gpu" x="56" y="566" width="238" height="52" rx="8"/>
+        <text class="t" x="72" y="588">Dedicated GPU</text>
+        <text class="mu" x="72" y="607">whole IOMMU group · FLR + scrub</text>
+      </svg>
+    </div>
+    <div class="legend">
+      <span><i></i>allowed path</span>
+      <span><i class="tok"></i>credential path (agent never sees it)</span>
+      <span><i class="blk"></i>path removed by design</span>
+    </div>
+    <figcaption>The agent's only way out is vsock to one host proxy. The proxy knows which VM is calling from the socket the connection arrived on. It adds a short-lived token from the broker, enforces per-tool policy, relays inference calls to the GPU VM, and holds irreversible actions for a human. The GPU never touches the agent's guest.</figcaption>
+  </figure>
+
+  <section>
+    <h2>Boundaries and what each one stops</h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Boundary</th><th>Stops</th><th>Doesn't stop</th></tr></thead>
+        <tbody>
+          <tr><td>Lean guest kernel</td><td>A kernel exploit lands in guest ring 0, not host ring 0. Most 2026 LPE trigger paths (io_uring, user namespaces, BPF) aren't compiled in.</td><td>Bugs in what's left; KVM itself.</td></tr>
+          <tr><td>Firecracker jailer</td><td>A VMM escape stays inside a chroot with its own cgroups and seccomp, and no network route.</td><td>KVM bugs.</td></tr>
+          <tr><td>vsock only, no NIC</td><td>Direct egress, DNS exfil, the metadata endpoint and the kube API. With the vsock-only kernel profile (<code>VSOCK_ONLY=1</code>), TCP/IP, the NIC driver and packet sockets aren't compiled in either.</td><td>Exfil through calls the proxy allows.</td></tr>
+          <tr><td>Host proxy</td><td>Prompt-injected exfil over permitted calls, through per-tool method/path/size rules, rate limits and a full audit log. No CA has to be planted in the guest.</td><td>Misuse that fits inside the policy.</td></tr>
+          <tr><td>Credential broker</td><td>Theft. The secret never enters the guest, and tokens are scoped, short-lived and revoked at teardown.</td><td>Use of a token's authority through allowed calls.</td></tr>
+          <tr><td>Inference VM split</td><td>PCI, the vendor GPU driver and model weights stay out of the agent's guest. If the GPU VM is compromised, it holds no credentials and has no egress.</td><td>GPU firmware persisting across tenants.</td></tr>
+          <tr><td>Human approval</td><td>Irreversible actions taken on injected instructions.</td><td>Approval fatigue.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Still open</h2>
+    <ul>
+      <li>A remote model API remains an allowed path out, because prompt content is data. Local inference in the GPU VM closes it.</li>
+      <li>Firecracker VFIO passthrough was landing in spring 2026 (PR #5870, <code>--enable-pci</code>) but isn't confirmed in a release. Until it is, the inference VM runs on Cloud Hypervisor or QEMU.</li>
+      <li>Shared GPU access (vGPU, MIG across tenants, gVisor nvproxy) would expose the host GPU driver to the guest. The design assumes one dedicated GPU per trust domain.</li>
+      <li>Nothing here bounds KVM. Host patch cadence still matters.</li>
+    </ul>
+  </section>
+</main>
