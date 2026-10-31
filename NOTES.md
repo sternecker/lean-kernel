@@ -88,7 +88,7 @@ This repo is item 3, done so that item 2 is a build-time fact instead of a runti
 | `RANDOMIZE_BASE`, `RANDOMIZE_MEMORY`, `RANDOMIZE_KSTACK_OFFSET_DEFAULT` | Attacker has to leak addresses before using them. |
 | `STRICT_KERNEL_RWX`, `DEBUG_WX`, `VMAP_STACK` | No writable+executable kernel memory; stack overflows hit guard pages. |
 | `STACKPROTECTOR_STRONG`, `SCHED_STACK_END_CHECK` | Canaries on most functions. |
-| `SLAB_FREELIST_HARDENED`, `SLAB_FREELIST_RANDOM`, `RANDOM_KMALLOC_CACHES`, `SHUFFLE_PAGE_ALLOCATOR`, `SLAB_MERGE_DEFAULT=n` | Heap layout is unpredictable and freelist pointers are obfuscated; use-after-free and heap-spray exploits get much harder. |
+| `SLAB_FREELIST_HARDENED`, `SLAB_FREELIST_RANDOM`, `RANDOM_KMALLOC_CACHES`, `SHUFFLE_PAGE_ALLOCATOR` (inert without `page_alloc.shuffle=1` in `boot_args`, which `vm/vm.json.in` sets), `SLAB_MERGE_DEFAULT=n` | Heap layout is unpredictable and freelist pointers are obfuscated; use-after-free and heap-spray exploits get much harder. |
 | `INIT_ON_ALLOC_DEFAULT_ON`, `INIT_ON_FREE_DEFAULT_ON`, `INIT_STACK_ALL_ZERO`, `ZERO_CALL_USED_REGS` | Uninitialized-memory bugs stop leaking data; freed memory is scrubbed. Costs a few percent CPU; the guest runs one agent. |
 | `HARDENED_USERCOPY` (+`_DEFAULT_ON`), `FORTIFY_SOURCE`, `UBSAN_BOUNDS` + `UBSAN_TRAP`, `BUG_ON_DATA_CORRUPTION`, `LIST_HARDENED` | Bounds and integrity checks that turn silent corruption into an immediate crash. UBSAN's bool/enum checks stay off: with trap + panic-on-oops they would turn harmless load warnings into guest panics. |
 | `SLAB_BUCKETS`, `KFENCE` (sample interval 100 ms) | Separate kmalloc buckets for user-controlled allocation sizes; a low-overhead sampled detector for heap out-of-bounds and use-after-free. |
@@ -120,15 +120,22 @@ control-flow integrity on indirect calls, kCFI by default via `CFI_AUTO_DEFAULT=
   bzImage decompressor; Firecracker booting the bare ELF skips it (`Kernel Offset: disabled` even with
   `RANDOMIZE_BASE=y`). `make build`/`make run` use bzImage; three test boots on 2026-10-31 got offsets
   0x13000000, 0x9000000, 0x20000000. Within one VM the offset is fixed, so a guest-side info leak still defeats it.
-- `RANDSTRUCT_FULL` only helps while the build stays private. The seed is generated at build time
-  (`out/scripts/basic/randstruct.seed`, gitignored, regenerated after `make clean`), and anyone holding
-  the binary can recover the struct layouts from it, so an exploit written against a published `bzImage`
-  works on every machine running that build. Distribute the source (configs, fragments, scripts),
-  not kernel binaries: each deployment runs `make config build` and gets its own seed. If prebuilt
-  kernels are ever published, label them as test builds, ship `bzImage` only (`vmlinux` and
-  `System.map` make the layouts easier to read), and don't make builds reproducible: a fixed seed is a public seed.
-  The other randomization (KASLR, kstack offset, slab freelist, page allocator shuffle, stack canaries)
-  happens at boot or at runtime and is unaffected by publishing the binary.
+- `RANDSTRUCT_FULL` only helps while the build stays private. The seed is random bytes from
+  `/dev/urandom`, generated once per build tree at `out/scripts/basic/randstruct.seed` (gitignored), and
+  anyone holding the binary can recover the struct layouts from it: `scripts/extract-vmlinux` turns a
+  `bzImage` back into the full kernel, so shipping `bzImage` without `vmlinux` hides nothing that matters.
+  An exploit written against a published build works on every machine running it. So:
+  - Distribute the source (configs, fragments, scripts), not kernel binaries. Each host runs
+    `make config build` and gets its own seed. Any binary that is published is a test build; its layout is public.
+  - Never commit, copy or share `out/scripts/basic/randstruct.seed`, `out/include/generated/randstruct_hash.h`
+    or a tarball of `out/`. Reproducibility settings (`KBUILD_BUILD_TIMESTAMP` etc.) don't fix the seed;
+    sharing these files does.
+  - The seed survives rebuilds: nothing deletes it but `make clean`. Delete it on every kernel bump
+    (HOWTO §8) so one leaked layout doesn't carry over to the next version.
+  - The unit is the host, not the VM: every VM on a host boots the same `out/bzImage` and shares one
+    layout, so a guest that learns it (e.g. via an info leak) has it for its neighbours too.
+  The other randomization (KASLR, kstack offset, slab freelist, page allocator shuffle with
+  `page_alloc.shuffle=1`, stack canaries) happens at boot or at runtime and is unaffected by publishing the binary.
 - Cadence is the cost. See HOWTO §8.
 - This is for the agent tier only. The host machines stay on their distro kernel,
   which patches itself faster than a weekly manual check.

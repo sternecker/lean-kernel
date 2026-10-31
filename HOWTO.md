@@ -215,7 +215,9 @@ scripts/fetch-kernel.sh --check
 Prints `up to date` or `BEHIND: pinned X, current longterm Y`. When behind:
 
 1. Edit `VERSION`: `KERNEL_VERSION=<new>`.
-2. `make fetch config build check` and reboot-test with `make run`.
+2. `rm -f out/scripts/basic/randstruct.seed` so the new kernel gets a fresh RANDSTRUCT layout (the
+   seed otherwise survives every rebuild; see NOTES §5). Then `make fetch config build check` and
+   reboot-test with `make run`.
 3. Commit `VERSION` and the `.config` diff (`out/lean-<ver>.config` is copied for exactly this; diff it
    against the previous one before committing).
 
