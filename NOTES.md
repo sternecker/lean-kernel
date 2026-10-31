@@ -106,7 +106,7 @@ This repo is item 3, done so that item 2 is a build-time fact instead of a runti
 
 With the default clang build (`LLVM=0` for gcc drops these): `CFI` (6.18's name for `CFI_CLANG`; forward-edge
 control-flow integrity on indirect calls, kCFI by default via `CFI_AUTO_DEFAULT=n`),
-`RANDSTRUCT_FULL` (struct layouts differ per build; an exploit written for one build fails on another),
+`RANDSTRUCT_FULL` (struct layouts differ per build; an exploit written for one build fails on another; only while the build stays private, see §5),
 `KSTACK_ERASE` (kernel stack poisoned on syscall return, so stale stack data can't leak or be reused),
 `LTO_CLANG_THIN`.
 
@@ -120,6 +120,15 @@ control-flow integrity on indirect calls, kCFI by default via `CFI_AUTO_DEFAULT=
   bzImage decompressor; Firecracker booting the bare ELF skips it (`Kernel Offset: disabled` even with
   `RANDOMIZE_BASE=y`). `make build`/`make run` use bzImage; three test boots on 2026-10-31 got offsets
   0x13000000, 0x9000000, 0x20000000. Within one VM the offset is fixed, so a guest-side info leak still defeats it.
+- `RANDSTRUCT_FULL` only helps while the build stays private. The seed is generated at build time
+  (`out/scripts/basic/randstruct.seed`, gitignored, regenerated after `make clean`), and anyone holding
+  the binary can recover the struct layouts from it, so an exploit written against a published `bzImage`
+  works on every machine running that build. Distribute the source (configs, fragments, scripts),
+  not kernel binaries: each deployment runs `make config build` and gets its own seed. If prebuilt
+  kernels are ever published, label them as test builds, ship `bzImage` only (`vmlinux` and
+  `System.map` make the layouts easier to read), and don't make builds reproducible: a fixed seed is a public seed.
+  The other randomization (KASLR, kstack offset, slab freelist, page allocator shuffle, stack canaries)
+  happens at boot or at runtime and is unaffected by publishing the binary.
 - Cadence is the cost. See HOWTO §8.
 - This is for the agent tier only. The host machines stay on their distro kernel,
   which patches itself faster than a weekly manual check.
