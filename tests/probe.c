@@ -346,6 +346,50 @@ static void surface_report(void)
 
 }
 
+// The root image must be root-owned and not group/world-writable, or the agent's uid could
+// rewrite what root runs at the next boot (mkfs.ext4 -d copies the build user's ownership).
+static void rootfs_ownership(void)
+{
+	static const char *const paths[] = { "/", "/init", "/bin", "/bin/busybox", "/bin/probe",
+					     "/bin/jail-exec", "/etc" };
+	for (size_t i = 0; i < sizeof paths / sizeof paths[0]; i++) {
+		char name[96], d[96];
+		struct stat st;
+		snprintf(name, sizeof name, "root-owned %s", paths[i]);
+		if (lstat(paths[i], &st)) {
+			result(0, name, strerror(errno));
+			continue;
+		}
+		snprintf(d, sizeof d, "uid %u gid %u mode %04o", st.st_uid, st.st_gid, st.st_mode & 07777);
+		result(st.st_uid == 0 && st.st_gid == 0 && !(st.st_mode & 0022), name, d);
+	}
+}
+
+// jail-exec must refuse any UID that isn't 1..65534 before running anything. 4294967296 used to
+// wrap to uid 0 and 4294967295 to (uid_t)-1 ("leave unchanged"): both kept root.
+static void jail_exec_rejects(void)
+{
+	static const char *const bad[] = { "0", "-1", "65535", "4294967295", "4294967296",
+					   "99999999999999999999", "+1", " 1", "01", "1x", "" };
+	for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+		char name[96], d[96];
+		snprintf(name, sizeof name, "jail-exec refuses uid \"%s\"", bad[i]);
+		pid_t p = fork();
+		if (p == 0) {
+			int fd = open("/dev/null", O_WRONLY);
+			if (fd >= 0)
+				dup2(fd, 2);
+			execl("/bin/jail-exec", "jail-exec", bad[i], "/bin/true", (char *)NULL);
+			_exit(126);
+		}
+		int st = 0;
+		waitpid(p, &st, 0);
+		int code = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+		snprintf(d, sizeof d, code == 127 ? "refused" : "exit %d (127 = refused)", code);
+		result(code == 127, name, d);
+	}
+}
+
 static void run_all(void)
 {
 	cut_syscalls();
@@ -427,6 +471,8 @@ int main(int argc, char **argv)
 	}
 	run_all();
 	lockdown_mode();
+	rootfs_ownership();
+	jail_exec_rejects();
 	fflush(stdout);
 
 	pid_t p = fork();

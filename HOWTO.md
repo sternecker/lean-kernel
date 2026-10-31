@@ -130,7 +130,7 @@ make test
 Builds `tests/probe.c` and `guest/jail-exec.c` statically, puts them in a separate image
 (`out/rootfs-test.ext4`) whose init runs the probe and reboots, boots that headless with the same kernel
 command line as `make run`, and fails unless every check passes. Takes about 10 seconds after the build.
-Full console log: `out/test.log`. Expect `PROBE: root 62 / user 72 / jailed 12 passed, 0 failed`.
+Full console log: `out/test.log`. Expect `PROBE: root 80 / user 72 / jailed 12 passed, 0 failed`. The root pass includes the image-ownership checks and `jail-exec` bad-UID refusals.
 
 The probe runs three passes: as root, as uid 65534, and as uid 65534 under `jail-exec` (§6c).
 Cut code must be gone even for root:
@@ -181,7 +181,7 @@ count as present here; `make test` checks what actually happens.
 jail-exec UID COMMAND [ARGS...]      # in the guest, as root, e.g. from /init
 ```
 
-`guest/jail-exec.c` (static, no libseccomp) drops to `UID` (refuses 0), sets `no_new_privs`, installs a
+`guest/jail-exec.c` (static, no libseccomp) drops to `UID` (only 1 to 65534, digits only; it then verifies every id changed and that root can't be regained), sets `no_new_privs`, installs a
 seccomp filter, and execs the command. The filter kills any non-x86_64 or x32 syscall; returns `EPERM`
 for `perf_event_open`, `vmsplice`, ptrace and process_vm_*, file handles, fanotify, `unshare`/`setns`,
 the mount family, swap, reboot, clock setting, hostname, quota, syslog, and `clone` with namespace flags;
@@ -242,6 +242,26 @@ In order, one at a time:
    ext_authz once TLS termination is in place.
 4. **Then** the in-guest stack from the reading: Landlock + seccomp around the agent process. Inside a
    lean guest they are the second wall, not the first.
+
+### 9.5 Claude Code in the VM (first test, before the jailer)
+
+```sh
+claude setup-token                       # on the host; prints a long-lived subscription token
+mkdir -p ~/.config/lean-kernel && (umask 077; cat > ~/.config/lean-kernel/oauth-token)   # paste it, then ctrl-d
+make agent-rootfs                        # out/rootfs-agent.ext4: the host's claude binary + bash + socat + jail-exec
+make agent                               # interactive: bash as uid 10000, run `claude`; `exit` powers off
+TASK='List the files in / and say what this machine is.' make agent   # headless, log in out/agent.log
+```
+
+The path: `claude` in the guest -> `127.0.0.1:8080` -> socat (as nobody, under jail-exec) -> vsock CID 2
+port 8080 -> `out/vsock-agent.sock_8080` -> `scripts/api-proxy.py` on the host -> `https://api.anthropic.com`.
+The guest holds only a placeholder token. The proxy swaps in the real one, forwards only `POST /v1/messages`
+and `/v1/messages/count_tokens`, and logs one line per request to `out/agent-proxy.log`. The guest has no other
+route out. Root is read-only. `/home/agent` is a fresh 512 MB scratch drive each run (`KEEP_SCRATCH=1` keeps it).
+VM memory is 2 GB. This needs the default kernel profile, because `VSOCK_ONLY=1` also removes loopback TCP.
+
+Not yet: the proxy runs unjailed as your user. Firecracker isn't under the jailer (9.2). Claude Code is the host's
+binary, not a pinned version.
 
 ## Troubleshooting
 

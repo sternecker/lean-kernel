@@ -7,7 +7,7 @@ missing=()
 need() { command -v "$1" >/dev/null 2>&1 || missing+=("$2"); }
 need make make; need gcc gcc; need flex flex; need bison bison; need bc bc
 need pahole dwarves; need cpio cpio; need curl curl
-need /sbin/mkfs.ext4 e2fsprogs
+need /sbin/mkfs.ext4 e2fsprogs; need fakeroot fakeroot
 for p in libelf-dev libssl-dev; do dpkg -s "$p" >/dev/null 2>&1 || missing+=("$p"); done
 if [[ "$LLVM" == "1" && -z "$LLVM_DIR" ]]; then missing+=(clang-22 lld-22); fi
 [[ -n "$LLVM_DIR" ]] && echo "llvm: $LLVM_DIR"

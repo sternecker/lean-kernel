@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Minimal ext4 root image from the host's busybox, built without root privileges (mkfs.ext4 -d).
+# Minimal ext4 root image from the host's busybox, built without root privileges (fakeroot + mkfs.ext4 -d).
 # Enough to prove the kernel boots and to run a shell on the serial console. Replace with a real
 # rootfs (debootstrap trixie minbase, or the agent's own image) once the kernel is settled.
 # PROBE=<static binary> builds the test image instead (out/rootfs-test.ext4): init runs the probe,
@@ -67,5 +67,7 @@ mkdir -p "$OUT"
 img="$OUT/rootfs.ext4"
 [[ -n "${PROBE:-}" ]] && img="$OUT/rootfs-test.ext4"
 rm -f "$img"
-/sbin/mkfs.ext4 -q -L lean -d "$stage" "$img" "${size_mb}M"
+# mkfs.ext4 -d copies the staging files' owners. Without fakeroot every file would belong to the
+# build user, and a guest process running as that uid could rewrite /init or busybox on the rw root.
+fakeroot -- sh -c "chown -R 0:0 '$stage' && chmod -R go-w '$stage' && chmod 1777 '$stage/tmp' && /sbin/mkfs.ext4 -q -L lean -d '$stage' '$img' ${size_mb}M"
 echo "rootfs: $img (${size_mb} MB)"

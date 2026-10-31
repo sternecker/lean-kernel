@@ -82,15 +82,35 @@ int main(int argc, char **argv)
 		fprintf(stderr, "usage: jail-exec UID COMMAND [ARGS...]\n");
 		return 127;
 	}
+	// Digits only (no sign, space or leading zero), 1..65534. A plain strtol + cast let 4294967296
+	// wrap to uid 0 and 4294967295 become (uid_t)-1, which setresuid treats as "leave unchanged":
+	// either way the agent kept root.
+	const char *s = argv[1];
 	char *end;
-	long uid = strtol(argv[1], &end, 10);
-	if (*end || uid <= 0) {
-		fprintf(stderr, "jail-exec: UID must be a positive number (never run the agent as root)\n");
+	errno = 0;
+	long v = (*s >= '1' && *s <= '9') ? strtol(s, &end, 10) : -1;
+	if (v < 1 || v > 65534 || errno || *end) {
+		fprintf(stderr, "jail-exec: UID must be a number from 1 to 65534 (never run the agent as root)\n");
 		return 127;
 	}
-	if (setgroups(0, NULL) || setresgid((gid_t)uid, (gid_t)uid, (gid_t)uid) ||
-	    setresuid((uid_t)uid, (uid_t)uid, (uid_t)uid)) {
+	uid_t uid = (uid_t)v;
+	gid_t gid = (gid_t)v;
+	if (setgroups(0, NULL) || setresgid(gid, gid, gid) || setresuid(uid, uid, uid)) {
 		perror("jail-exec: drop privileges");
+		return 127;
+	}
+	// Verify the drop instead of trusting the return codes: every id is the target, no
+	// supplementary groups, and root can't be taken back.
+	uid_t ru, eu, su;
+	gid_t rg, eg, sg;
+	if (getresuid(&ru, &eu, &su) || getresgid(&rg, &eg, &sg) ||
+	    ru != uid || eu != uid || su != uid || rg != gid || eg != gid || sg != gid ||
+	    getgroups(0, NULL) != 0) {
+		fprintf(stderr, "jail-exec: privilege drop did not take effect\n");
+		return 127;
+	}
+	if (setresuid(0, 0, 0) == 0 || setresgid(0, 0, 0) == 0) {
+		fprintf(stderr, "jail-exec: could regain root after dropping privileges\n");
 		return 127;
 	}
 	if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) {

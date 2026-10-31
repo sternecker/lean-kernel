@@ -50,6 +50,8 @@ make rootfs    # 64 MB busybox ext4 image with a serial-console shell
 make syscalls  # lists present and compiled-out syscalls from out/vmlinux
 make test      # boots the probe guest headless; fails if any cut or hardening check doesn't hold
 make run       # boots in Firecracker; ctrl-a x does nothing here, use `reboot -f` (exits Firecracker; `poweroff -f` only halts)
+make agent-rootfs  # read-only image with Claude Code, bash, socat, jail-exec (root-owned, via fakeroot)
+make agent     # Claude Code in the VM; credential stays in a host proxy (HOWTO §9.5)
 ```
 
 `make config` is the step that matters. `merge_config.sh` silently lets Kconfig dependencies override a fragment line; `configure.sh` re-reads the fragment afterwards and refuses to continue if any `=y` didn't take or any `is not set` came back as built-in. A cut that didn't happen is a false sense of security.
