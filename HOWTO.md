@@ -3,14 +3,16 @@
 Host: Debian 13 (trixie), x86_64, KVM. Everything runs as your user except the one `apt install`
 and the optional tap device. Commands assume you are in the repo root.
 
-## 0. Where things stand (2026-10-23)
+## 0. Where things stand (2026-11-01)
 
-Already done and committed:
-- Firecracker v1.17.0 fetched and sha256-verified into `bin/` (`make deps` re-does this on a fresh clone).
-- `linux-6.18.58` (current 6.18 longterm) fetched, verified against kernel.org's `sha256sums.asc`, extracted to `work/`.
-- `/dev/kvm` present and writable by this user.
+Working on the development host:
+- The kernel (`linux-6.18.58`, pinned and sha256-verified) configures, builds and passes `make check` and
+  `make test` in the default profile (`out/`). The vsock-only profile (`out-vsock/`) passed on 2026-10-31
+  with 27 jailed checks; `test.sh` now expects 28 there, so rerun it before relying on it.
+- The agent VM (9.5) runs Claude Code jailed: Firecracker under the jailer with a uid per run, the API proxy as
+  `lean-proxy`, the credential outside the VM. `make agent-test` passes 31 checks.
 
-Blocked at `make config`: the kernel's Kconfig tooling needs `flex` and `bison`; the build needs `libelf-dev` and `libssl-dev`.
+On a fresh clone, start at section 1. `make deps` fetches and verifies Firecracker; `make fetch` the kernel.
 
 ## 1. Install the build packages (once, sudo)
 
@@ -219,7 +221,7 @@ The allowlist is the set of syscalls Claude Code, bash, busybox and socat were s
 of those calls. To redo it after a Claude Code update, or for a different agent:
 
 ```sh
-STRACE=1 make agent-rootfs && AGENT_STRACE=1 TASK='...' make agent   # out/strace-agent.txt, out/strace-socat.txt
+STRACE=1 make agent-rootfs && AGENT_STRACE=1 TASK='...' make agent   # out/runs/latest/strace-{agent,socat}.txt
 make agent-rootfs                                                    # rebuild without strace afterwards
 ```
 (Without the jail installed yet, add `JAIL=0`; see 9.5.)
@@ -290,7 +292,7 @@ In order, one at a time:
 4. **Then** the in-guest stack from the reading: Landlock + seccomp around the agent process. Inside a
    lean guest they are the second wall, not the first.
 
-### 9.5 Claude Code in the VM (first test, before the jailer)
+### 9.5 Claude Code in the VM
 
 `make agent` and `make agent-test` require the jail (9.2) by default. Before it's set up, prefix them with `JAIL=0`
 to run Firecracker and the proxy as you.
@@ -304,7 +306,8 @@ TASK='List the files in / and say what this machine is.' make agent   # headless
 ```
 
 The path: `claude` in the guest -> `127.0.0.1:8080` -> socat (as nobody, under jail-exec) -> vsock CID 2
-port 8080 -> `out/vsock-agent.sock_8080` -> `scripts/api-proxy.py` on the host -> `https://api.anthropic.com`.
+port 8080 -> the run's `v.sock_8080` (in the jail's chroot, a hard link to the proxy's socket; unjailed,
+`out/runs/<id>/v.sock_8080`) -> `scripts/api-proxy.py` on the host -> `https://api.anthropic.com`.
 The guest holds only a placeholder token. The proxy swaps in the real one, forwards only `POST /v1/messages`
 and `/v1/messages/count_tokens`, and logs one line per request to `out/agent-proxy.log`. It also rejects any
 request that asks Anthropic's servers to reach out for the agent: server tools (`web_fetch`, `web_search`, code
@@ -312,18 +315,25 @@ execution), `mcp_servers`, and content blocks whose `source` is a URL or an uplo
 is fetched server-side), anywhere in the messages, tool results included. Otherwise a URL with data in its query
 string would be a way out. The checks are allowlists: top-level fields (`ALLOW_FIELDS`) and source types
 (`ALLOW_SOURCES`: base64, text, content). A field the API adds later is refused, with its name in the DENY line,
-until it's read and added. Log lines escape control characters, and what `make agent` prints from the guest and
-the log has them stripped, so the guest can't send escape sequences to your terminal. Claude Code's WebSearch
-tool is therefore unavailable in the VM.
+until it's read and added. Claude Code's WebSearch tool is therefore unavailable in the VM. Log lines escape control
+characters, and what headless `make agent` prints from the guest and the log has them stripped, so the guest
+can't send escape sequences to your terminal. Interactive mode is the exception: the serial console reaches your
+terminal raw, because filtering it would break Claude Code's full-screen interface.
 Each session (one proxy process) also has a budget: 500 requests, 50M input tokens (cache reads included), 1M output
 tokens and 60 requests a minute, with an optional model allowlist. Change them with `AGENT_MAX_REQUESTS`,
 `AGENT_MAX_INPUT_TOKENS`, `AGENT_MAX_OUTPUT_TOKENS`, `AGENT_RPM` and `AGENT_MODELS='claude-sonnet-*'` (0 = unlimited).
 Each forwarded request's log line shows its tokens and the running total, and the log ends with a session summary.
 A Claude Code request costs about 16k input tokens, almost all of it cached system prompt and tool definitions.
-Over budget, the agent gets a 403 (which Claude Code labels "Failed to authenticate") and stops. Over the rate,
+Over budget, the agent gets a 403, which Claude Code reports as an authentication error ("Please run /login ·
+API Error: 403 ..."), and stops. Over the rate,
 it gets a 429 and backs off. In the guest, `/proc` is `hidepid=invisible`, so the agent sees only its own
 processes, and the agent runs with `umask 077`. The guest has no other
-route out. Root is read-only. `/home/agent` is a fresh 512 MB scratch drive each run (`KEEP_SCRATCH=1` keeps it).
+route out. Root is read-only. `/home/agent` is a fresh 512 MB scratch drive each run, discarded at the end; `KEEP_SCRATCH=1` starts from
+`out/scratch-agent.ext4` and saves the home back to it (one `KEEP_SCRATCH` run at a time: a second is refused).
+The headless task and `TOOLS` arrive on a separate read-only drive written fresh each run, never from the home,
+so a kept home can't replay an old task.
+Runs can overlap: each works in its own `out/runs/<id>/` (VM config, socket, scratch drive, `agent.log`,
+`agent-proxy.log`), `out/agent.log` and `out/agent-proxy.log` point at the newest run, and the newest 20 are kept.
 `/tmp` and `/home/agent` are mounted `noexec`. With `vm.memfd_noexec=2` and no interpreter in the image that
 loads native code, the agent can't run a binary it wrote, which is what most kernel exploits need. `AGENT_EXEC=1 make agent`
 lifts this for workloads that build and run code. The protection weakens once the image gains Python, Node or a compiler.
@@ -373,7 +383,8 @@ Each run gets a fresh chroot under `/srv/lean-agent/firecracker/<id>/root`:
   token to it, so `lean-proxy` never needs access to your home directory, which is mode 710 anyway.
 - **Inputs:** the wrapper reads the kernel, images, config and proxy script as you and copies them into the jail,
   so root never reads a file for it that you couldn't.
-- **Cleanup:** the scratch drive is copied back to `out/` for `KEEP_SCRATCH=1`, and everything else is removed.
+- **Cleanup:** the scratch drive is copied back to the run's `out/runs/<id>/` (kept for `KEEP_SCRATCH=1`, else
+  discarded), and everything else is removed. A run whose wrapper was killed outright is cleaned up by the next run.
 
 `sudo lean-agent-jail --check` verifies the installation. After editing `scripts/lean-agent-jail`, run
 `sudo scripts/jail-setup.sh` again; `sudo scripts/jail-setup.sh uninstall` removes it all. Changes to the proxy
@@ -400,7 +411,7 @@ everything else it sends. Firecracker also gets a file size limit (`fsize`): the
 Not yet:
 - Firecracker isn't in its own PID namespace: `--new-pid-ns` makes the jailer exit early, so the wrapper
   couldn't wait for the VM.
-- Claude Code is the host's binary, not a pinned version.
+- No project workspace: the agent gets an empty home (or a kept one), not a copy of your repo.
 
 ## Troubleshooting
 

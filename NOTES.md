@@ -159,7 +159,8 @@ control-flow integrity on indirect calls, kCFI by default via `CFI_AUTO_DEFAULT=
     an AF_UNIX shim (`socat UNIX-LISTEN:/run/egress.sock,fork VSOCK-CONNECT:2:8080`, then
     `curl --unix-socket`). A loopback TCP shim needs `INET` and only works in the default profile.
     Checked by hand against 6.18.58 Kconfig: `VSOCKETS` sits under `if NET`, outside `if INET`, and
-    nothing selects `INET`, `PACKET` or `VIRTIO_NET`. Not yet run through `make config` (flex missing).
+    nothing selects `INET`, `PACKET` or `VIRTIO_NET`. Since confirmed: `VSOCK_ONLY=1` builds and passed
+    `make test` on 2026-10-31 (`out-vsock/`); rerun it, the jailed-check minimum has risen since.
 - Does the authz sidecar see the agent's *tool call* (structured) or only the resulting HTTP request?
   Per-tool policy needs the former, or a convention that maps tools to distinct hosts/paths.
   - *Leaning (2026-10-30):* have the agent's tools call the proxy with structured requests (tool name
@@ -169,6 +170,11 @@ control-flow integrity on indirect calls, kCFI by default via `CFI_AUTO_DEFAULT=
   - *Leaning (2026-10-30):* with local inference in its own VM (below), prompts never leave the host.
     With a remote model API, it stays an allowed path out and the proxy's size/rate limits and audit
     log are the only controls on it.
+  - *As built (2026-11-01):* the API is also a path to *third* parties: a request can ask Anthropic's
+    servers to fetch a URL (server tools, MCP servers, image or document blocks with a URL source).
+    `scripts/api-proxy.py` refuses those, from allowlists of top-level fields and content source types,
+    refuses duplicate JSON keys and forwards the re-encoded body it checked. Prompt content reaching
+    Anthropic itself remains an allowed path, bounded by the budgets.
 
 ### Credentials without a separate gateway (2026-10-30)
 
@@ -185,6 +191,12 @@ CONNECT-vs-termination point: the proxy sees full requests without a CA planted 
 The proxy runs in its own jail (own uid, own netns whose only route is upstream, seccomp) and owns
 DNS, allowlists, method/path/size and rate limits, the audit log, and human approval for irreversible
 actions. The Firecracker process itself gets no network route.
+
+*As built (2026-11-01, HOWTO §9.5), for one upstream (the Anthropic API):* the proxy runs as `lean-proxy`
+with no groups, no capabilities and `no_new_privs`, in the host's network namespace, where nftables lets
+that uid reach only the API's addresses on TCP 443. Root resolves the name, so the proxy needs no DNS. It
+has no seccomp filter of its own, no per-tool tokens (one long-lived subscription token) and no human
+approval step. Firecracker runs in an empty network namespace, as planned.
 
 Limit: hiding the secret stops theft, not misuse. The agent can still use the token's authority
 through allowed calls, so token scope and per-call policy are the real controls.

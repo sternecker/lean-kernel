@@ -5,17 +5,18 @@
 # and rerun the setup.
 #
 #   sudo lean-agent-jail --check                 verify the installation, start nothing
-#   sudo lean-agent-jail [max-requests=N] [max-input-tokens=N] [max-output-tokens=N] [rpm=N] [models=LIST]
+#   sudo lean-agent-jail run=ID [max-requests=N] [max-input-tokens=N] [max-output-tokens=N] [rpm=N] [models=LIST]
 #
-# Inputs come from OUT (from /etc/lean-agent.conf), prepared by run-agent.sh as OWNER:
-#   bzImage, rootfs-agent.ext4, scratch-agent.ext4, vm-jail.json (paths relative to the chroot),
-#   and the proxy from REPO/scripts/api-proxy.py. Every one is read as OWNER (setpriv), so root never
+# Inputs come from OUT (from /etc/lean-agent.conf), prepared by run-agent.sh as OWNER: bzImage and
+# rootfs-agent.ext4 from OUT, and from the run's own directory OUT/runs/ID (so runs can overlap):
+# scratch.ext4, task.img and vm-jail.json (paths relative to the chroot). The proxy comes from
+# REPO/scripts/api-proxy.py. Every one is read as OWNER (setpriv), so root never
 #   reads a file for this script that OWNER couldn't. Firecracker parses vm-jail.json only after
 #   the jailer has chrooted it, so the config can't name anything outside the jail.
 #
 # Per run:
-#   /srv/lean-agent/firecracker/<id>/root   chroot: kernel and root image (read-only copies), the scratch
-#                                           drive, the config, the vsock socket. Root-owned while root fills
+#   /srv/lean-agent/firecracker/<id>/root   chroot: kernel, root image and task drive (read-only copies),
+#                                           the scratch drive, the config, the vsock socket. Root-owned while root fills
 #                                           it, handed to the run's Firecracker uid only just before launch.
 #   /srv/lean-agent/firecracker/<id>/proxy  the proxy's directory, owned by lean-proxy
 #   Firecracker: a uid of its own for this run (FC_UID_BASE.., no passwd entry; claimed in /run, so two
@@ -28,7 +29,8 @@
 #     DNS), and nftables (table inet lean_agent) lets uid lean-proxy open TCP 443 to those addresses
 #     only; everything else it sends is rejected.
 #   Firecracker: also a file size limit (it only ever writes into the fixed-size scratch drive).
-#   On exit: the scratch drive is copied back to OUT for KEEP_SCRATCH, everything else is removed.
+#   On exit: the scratch drive is copied back to OUT/runs/ID (run-agent.sh keeps it for KEEP_SCRATCH=1
+#   or discards it), the proxy log is in OUT/runs/ID/agent-proxy.log, everything else is removed.
 set -euo pipefail
 umask 077
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
@@ -222,10 +224,15 @@ if [[ "${1:-}" == "--check" ]]; then
   exit 0
 fi
 
-# Proxy budget arguments: key=value, numbers and model names only.
+# run=ID names the run directory run-agent.sh prepared; budget arguments: key=value, numbers and model
+# names only.
 proxy_args=()
+RUNDIR=""
 for arg in "$@"; do
   case "$arg" in
+    run=*)
+      v="${arg#*=}"; [[ "$v" =~ ^agent-[0-9]{8}-[0-9]{6}-[0-9]{1,10}$ ]] || die "bad run id in $arg"
+      RUNDIR="$OUT/runs/$v" ;;
     max-requests=*|max-input-tokens=*|max-output-tokens=*|rpm=*)
       v="${arg#*=}"; [[ "$v" =~ ^[0-9]{1,12}$ ]] || die "bad number in $arg"
       proxy_args+=("--${arg%%=*}" "$v") ;;
@@ -236,6 +243,8 @@ for arg in "$@"; do
   esac
 done
 
+[[ -n "$RUNDIR" ]] || die "run=ID is required (scripts/run-agent.sh passes it)"
+as_owner test -d "$RUNDIR" -a ! -L "$RUNDIR" || die "$RUNDIR is not a directory $OWNER owns"
 tok_mode="$(as_owner stat -c %a "$TOKEN_FILE")" || die "can't read $TOKEN_FILE as $OWNER"
 (( ( 8#$tok_mode & 8#077 ) == 0 )) || die "$TOKEN_FILE is readable by group/others; chmod 600 it"
 
@@ -247,12 +256,12 @@ cleanup() {
   local rc=$?
   [[ -n "$fc" ]] && { kill "$fc" 2>/dev/null; wait "$fc" 2>/dev/null || true; }
   [[ -n "$proxy" ]] && { kill "$proxy" 2>/dev/null; wait "$proxy" 2>/dev/null || true; }
-  # Keep the agent's home: copy the scratch drive back to OUT (for KEEP_SCRATCH=1). Once Firecracker
+  # Keep the agent's home: copy the scratch drive back to the run directory. Once Firecracker
   # has run, everything under $jail is its uid's: read it as that uid, never as root, or a swapped-in
   # symlink would make root copy out a file Firecracker's uid can't read.
-  # Only after a VM ran: an early failure must not overwrite OUT's copy with nothing.
+  # Only after a VM ran: an early failure must not overwrite the run's copy with nothing.
   if [[ $started == 1 ]]; then
-    as_fc cat -- "$jail/scratch.ext4" 2>/dev/null | as_owner sh -c 'cat > "$1.new" && mv -f -- "$1.new" "$1"' sh "$OUT/scratch-agent.ext4" || true
+    as_fc cat -- "$jail/scratch.ext4" 2>/dev/null | as_owner sh -c 'cat > "$1.new" && mv -f -- "$1.new" "$1"' sh "$RUNDIR/scratch.ext4" || true
   fi
   ip netns del "$ns" 2>/dev/null || true
   [[ -d "/sys/fs/cgroup/$CG_PARENT/$id" ]] && rmdir "/sys/fs/cgroup/$CG_PARENT/$id" 2>/dev/null || true
@@ -284,8 +293,9 @@ put() {  # put SRC DEST MODE OWNER: read SRC as OWNER, write DEST (new, in a roo
 }
 put "$OUT/bzImage"            "$jail/bzImage"      0444 root:root
 put "$OUT/rootfs-agent.ext4"  "$jail/rootfs.ext4"  0444 root:root
-put "$OUT/scratch-agent.ext4" "$jail/scratch.ext4" 0600 "$fc_uid:$fc_gid"
-put "$OUT/vm-jail.json"       "$jail/vm.json"      0444 root:root
+put "$RUNDIR/scratch.ext4"     "$jail/scratch.ext4" 0600 "$fc_uid:$fc_gid"
+put "$RUNDIR/task.img"         "$jail/task.img"     0444 root:root
+put "$RUNDIR/vm-jail.json"     "$jail/vm.json"      0444 root:root
 # Largest file Firecracker may write: the scratch drive it was given, plus a little. A write past
 # RLIMIT_FSIZE fails, so this must not be smaller than the drive.
 FSIZE_MAX=$(( $(stat -c %s "$jail/scratch.ext4") + 64 * 1024 * 1024 ))
@@ -293,11 +303,12 @@ put "$REPO/scripts/api-proxy.py" "$pdir/api-proxy.py" 0444 root:root
 chown lean-proxy:lean-proxy "$pdir"
 
 egress_setup
-# The proxy: its own user, no groups, no capabilities. Token on fd 0, log appended to OUT as OWNER.
+# The proxy: its own user, no groups, no capabilities. Token on fd 0, log appended to the run directory
+# as OWNER.
 as_owner cat -- "$TOKEN_FILE" | setpriv --reuid=lean-proxy --regid=lean-proxy --clear-groups \
     --inh-caps=-all --bounding-set=-all --no-new-privs -- \
     python3 -I "$pdir/api-proxy.py" --listen "$pdir/p.sock" --token-fd 0 "${upstream_args[@]}" "${proxy_args[@]}" \
-    2> >(as_owner sh -c 'cat >> "$1"' sh "$OUT/agent-proxy.log") &
+    2> >(as_owner sh -c 'cat >> "$1"' sh "$RUNDIR/agent-proxy.log") &
 proxy=$!
 # The proxy in its own cgroup next to Firecracker's: memory and task limits on the host side of the
 # vsock, whatever the guest sends. Its own connection cap (16) keeps it well under the task limit.
@@ -311,7 +322,7 @@ if [[ "${CGROUPS:-1}" == 1 ]]; then
   echo "$proxy" > "$pcg/cgroup.procs" || die "could not move the proxy into $pcg"
 fi
 for _ in $(seq 50); do [[ -S "$pdir/p.sock" ]] && break; sleep 0.1; done
-[[ -S "$pdir/p.sock" ]] || die "api-proxy did not start; see $OUT/agent-proxy.log"
+[[ -S "$pdir/p.sock" ]] || die "api-proxy did not start; see $RUNDIR/agent-proxy.log"
 # Firecracker turns a guest connection to vsock port 8080 into a connect to v.sock_8080 in the chroot.
 # A hard link puts the proxy's socket there; owning it lets Firecracker's uid connect. Checked again on
 # the link itself: lean-proxy owns $pdir and could have swapped p.sock between the test and the ln.

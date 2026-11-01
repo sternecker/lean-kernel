@@ -152,13 +152,20 @@ if [ "$agent_mode" = selftest ]; then
     $JAIL /bin/bash /bin/agent-selftest agent; r2=$?
   echo; echo "AGENT-EXIT=$((r1 + r2))"
 elif [ "$agent_mode" = headless ]; then
+  # The task comes on its own read-only raw drive (/dev/vdc) that the host writes fresh each run: line 1
+  # the allowed tools, the rest the task, NUL-padded to whole blocks. Not from /home/agent, which
+  # KEEP_SCRATCH=1 carries over from earlier runs. Root reads it here; the agent can't open the device.
+  AGENT_TOOLS="$(tr -d '\000' < /dev/vdc | sed -n 1p)"
+  AGENT_TASK="$(tr -d '\000' < /dev/vdc | sed 1d)"
+  [ -n "$AGENT_TASK" ] || fail "no task on /dev/vdc"
   echo "AGENT-START"
   # Every line the agent prints is prefixed "| ", so none can pose as a marker that run-agent.sh reads
   # from this stream (AGENT-EXIT=, DENIALS-*). Its fds 0-2 are a file and a pipe, never the console:
   # jail-exec grants the terminal on fds 0-2, and the console would let it write unprefixed lines.
   # A process the agent leaves holding the pipe keeps sed waiting; TIMEOUT then ends the run as failed.
   set -o pipefail
-  $T "$@" /bin/bash -c 'claude -p "$(cat /home/agent/.task)" --allowedTools "$(cat /home/agent/.tools)" 2>&1' \
+  $T "$@" /usr/bin/env AGENT_TASK="$AGENT_TASK" AGENT_TOOLS="$AGENT_TOOLS" \
+    /bin/bash -c 'claude -p "$AGENT_TASK" --allowedTools "$AGENT_TOOLS" 2>&1' \
     </dev/null 2>&1 | sed 's/^/| /'
   rc=$?; set +o pipefail
   echo; echo "AGENT-EXIT=$rc"   # own line: claude may leave a terminal escape unterminated
