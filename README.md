@@ -31,7 +31,7 @@ scripts/
   syscalls.sh, .py       which syscalls the built vmlinux has (static, no boot)
   net-tap.sh             optional host tap for guest networking (needs sudo)
 tests/probe.c            in-guest probe: tries every cut as root, as a user, and under jail-exec
-guest/jail-exec.c        in-guest launcher: drop to the agent uid, no_new_privs, seccomp, exec
+guest/jail-exec.c        in-guest launcher: drop to the agent uid, no_new_privs, Landlock, seccomp allowlist, exec
 vm/vm.json.in            Firecracker config template
 bin/                     Firecracker release binaries (gitignored, fetched by deps-check)
 work/                    kernel source + build tree (gitignored)

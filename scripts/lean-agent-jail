@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# lean-agent-jail: run one agent VM with Firecracker under its jailer, and the API proxy as its own
+# user. Installed root-owned to /usr/local/sbin by scripts/jail-setup.sh; scripts/run-agent.sh runs it
+# through a sudoers rule that allows this one command. Never edit the installed copy; edit this file
+# and rerun the setup.
+#
+#   sudo lean-agent-jail --check                 verify the installation, start nothing
+#   sudo lean-agent-jail [max-requests=N] [max-input-tokens=N] [max-output-tokens=N] [rpm=N] [models=LIST]
+#
+# Inputs come from OUT (from /etc/lean-agent.conf), prepared by run-agent.sh as OWNER:
+#   bzImage, rootfs-agent.ext4, scratch-agent.ext4, vm-jail.json (paths relative to the chroot),
+#   and the proxy from REPO/scripts/api-proxy.py. Every one is read as OWNER (setpriv), so root never
+#   reads a file for this script that OWNER couldn't. Firecracker parses vm-jail.json only after
+#   the jailer has chrooted it, so the config can't name anything outside the jail.
+#
+# Per run:
+#   /srv/lean-agent/firecracker/<id>/root   chroot, owned by lean-fc: kernel and root image (read-only
+#                                           copies), the scratch drive, the config, the vsock socket
+#   /srv/lean-agent/firecracker/<id>/proxy  the proxy's directory, owned by lean-proxy
+#   Firecracker: uid lean-fc, chroot, its own empty network namespace (no route anywhere), cgroup
+#     limits (memory, pids, cpu) under /sys/fs/cgroup/lean-agent/<id>, fd limit, and its own seccomp
+#   proxy: uid lean-proxy, no groups, no capabilities, no_new_privs. The token arrives on a pipe.
+#   On exit: the scratch drive is copied back to OUT for KEEP_SCRATCH, everything else is removed.
+set -euo pipefail
+umask 077
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+LIB=/usr/local/lib/lean-agent
+BASE=/srv/lean-agent
+CONF=/etc/lean-agent.conf
+CG_PARENT=lean-agent
+
+die() { echo "lean-agent-jail: $*" >&2; exit 1; }
+[[ $EUID -eq 0 ]] || die "run through sudo"
+[[ -f $CONF && "$(stat -c '%u' "$CONF")" == 0 && ! -L $CONF ]] || die "$CONF missing or not root-owned; run scripts/jail-setup.sh"
+(( ( 8#$(stat -c '%a' "$CONF") & 8#022 ) == 0 )) || die "$CONF is group/world-writable"
+# shellcheck disable=SC1090
+source "$CONF"   # OWNER REPO OUT TOKEN_FILE MEM_MAX PIDS_MAX CPU_MAX CGROUPS
+[[ "${SUDO_USER:-}" == "$OWNER" ]] || die "only $OWNER may run this"
+owner_gid="$(id -g "$OWNER")"
+as_owner() { setpriv --reuid="$OWNER" --regid="$owner_gid" --init-groups --no-new-privs -- "$@"; }
+fc_uid="$(id -u lean-fc)"; fc_gid="$(id -g lean-fc)"
+id -u lean-proxy >/dev/null || die "user lean-proxy missing; run scripts/jail-setup.sh"
+
+if [[ "${1:-}" == "--check" ]]; then
+  for f in "$LIB/jailer" "$LIB/firecracker"; do
+    [[ "$(stat -c '%u %a' "$f")" == "0 755" ]] || die "$f must be root-owned 0755"
+  done
+  echo "jailer:      $("$LIB/jailer" --version | head -1)"
+  echo "firecracker: $("$LIB/firecracker" --version | head -1)"
+  echo "users:       lean-fc $fc_uid:$fc_gid, lean-proxy $(id -u lean-proxy):$(id -g lean-proxy)"
+  echo "owner:       $OWNER, out $OUT"
+  as_owner test -r "$TOKEN_FILE" || die "token $TOKEN_FILE not readable by $OWNER"
+  echo "token:       $TOKEN_FILE (mode $(as_owner stat -c %a "$TOKEN_FILE"))"
+  if [[ "${CGROUPS:-1}" == 1 ]]; then
+    [[ "$(stat -fc %T /sys/fs/cgroup)" == cgroup2fs ]] || die "cgroups v2 not mounted at /sys/fs/cgroup"
+    for c in memory pids cpu; do grep -qw "$c" /sys/fs/cgroup/cgroup.subtree_control || die "cgroup controller $c not enabled at the root"; done
+    echo "cgroups:     v2, memory.max=$MEM_MAX pids.max=$PIDS_MAX cpu.max=$CPU_MAX"
+  else
+    echo "cgroups:     off (CGROUPS=0 in $CONF)"
+  fi
+  ip netns list >/dev/null || die "ip netns not usable"
+  echo "netns:       ok"
+  echo "check: ok"
+  exit 0
+fi
+
+# Proxy budget arguments: key=value, numbers and model names only.
+proxy_args=()
+for arg in "$@"; do
+  case "$arg" in
+    max-requests=*|max-input-tokens=*|max-output-tokens=*|rpm=*)
+      v="${arg#*=}"; [[ "$v" =~ ^[0-9]{1,12}$ ]] || die "bad number in $arg"
+      proxy_args+=("--${arg%%=*}" "$v") ;;
+    models=*)
+      v="${arg#*=}"; [[ "$v" =~ ^[A-Za-z0-9.*,_-]*$ ]] || die "bad model list in $arg"
+      proxy_args+=(--models "$v") ;;
+    *) die "unknown argument: $arg" ;;
+  esac
+done
+
+tok_mode="$(as_owner stat -c %a "$TOKEN_FILE")" || die "can't read $TOKEN_FILE as $OWNER"
+(( ( 8#$tok_mode & 8#077 ) == 0 )) || die "$TOKEN_FILE is readable by group/others; chmod 600 it"
+
+id="agent-$(date +%Y%m%d-%H%M%S)-$$"
+run="$BASE/firecracker/$id"; jail="$run/root"; pdir="$run/proxy"; ns="lean-$id"
+proxy=""; fc=""; started=0
+as_fc() { setpriv --reuid=lean-fc --regid=lean-fc --clear-groups --no-new-privs -- "$@"; }
+cleanup() {
+  local rc=$?
+  [[ -n "$fc" ]] && { kill "$fc" 2>/dev/null; wait "$fc" 2>/dev/null || true; }
+  [[ -n "$proxy" ]] && { kill "$proxy" 2>/dev/null; wait "$proxy" 2>/dev/null || true; }
+  # Keep the agent's home: copy the scratch drive back to OUT (for KEEP_SCRATCH=1). Once Firecracker
+  # has run, everything under $jail is lean-fc's: read it as lean-fc, never as root, or a swapped-in
+  # symlink would make root copy out a file lean-fc can't read.
+  # Only after a VM ran: an early failure must not overwrite OUT's copy with nothing.
+  if [[ $started == 1 ]]; then
+    as_fc cat -- "$jail/scratch.ext4" 2>/dev/null | as_owner sh -c 'cat > "$1.new" && mv -f -- "$1.new" "$1"' sh "$OUT/scratch-agent.ext4" || true
+  fi
+  ip netns del "$ns" 2>/dev/null || true
+  [[ -d "/sys/fs/cgroup/$CG_PARENT/$id" ]] && rmdir "/sys/fs/cgroup/$CG_PARENT/$id" 2>/dev/null || true
+  [[ "$run" == "$BASE/firecracker/agent-"* ]] && rm -rf -- "$run"
+  exit "$rc"
+}
+trap cleanup EXIT
+# Signals (TIMEOUT, ctrl-c in a cooked terminal) end the run; cleanup stops Firecracker first.
+trap 'exit 130' INT TERM HUP
+
+mkdir -p "$BASE/firecracker" && chmod 0711 "$BASE" "$BASE/firecracker"
+mkdir -m 0711 "$run"
+mkdir -m 0700 "$jail" "$pdir"
+chown lean-fc:lean-fc "$jail"
+chown lean-proxy:lean-proxy "$pdir"
+
+put() {  # put SRC DEST MODE OWNER: read SRC as OWNER, write DEST as root
+  as_owner cat -- "$1" > "$2" || die "can't read $1"
+  chmod "$3" "$2"; chown "$4" "$2"
+}
+put "$OUT/bzImage"            "$jail/bzImage"      0444 root:root
+put "$OUT/rootfs-agent.ext4"  "$jail/rootfs.ext4"  0444 root:root
+put "$OUT/scratch-agent.ext4" "$jail/scratch.ext4" 0600 lean-fc:lean-fc
+put "$OUT/vm-jail.json"       "$jail/vm.json"      0444 root:root
+put "$REPO/scripts/api-proxy.py" "$pdir/api-proxy.py" 0444 root:root
+
+# The proxy: its own user, no groups, no capabilities. Token on fd 0, log appended to OUT as OWNER.
+as_owner cat -- "$TOKEN_FILE" | setpriv --reuid=lean-proxy --regid=lean-proxy --clear-groups \
+    --inh-caps=-all --bounding-set=-all --no-new-privs -- \
+    python3 -I "$pdir/api-proxy.py" --listen "$pdir/p.sock" --token-fd 0 "${proxy_args[@]}" \
+    2> >(as_owner sh -c 'cat >> "$1"' sh "$OUT/agent-proxy.log") &
+proxy=$!
+for _ in $(seq 50); do [[ -S "$pdir/p.sock" ]] && break; sleep 0.1; done
+[[ -S "$pdir/p.sock" ]] || die "api-proxy did not start; see $OUT/agent-proxy.log"
+# Firecracker turns a guest connection to vsock port 8080 into a connect to v.sock_8080 in the chroot.
+# A hard link puts the proxy's socket there; owning it lets lean-fc connect.
+[[ -S "$pdir/p.sock" && ! -L "$pdir/p.sock" ]] || die "proxy socket is not a socket"
+ln -P -- "$pdir/p.sock" "$jail/v.sock_8080"
+chown -h lean-fc:lean-fc "$jail/v.sock_8080"
+
+# An empty network namespace: Firecracker needs no network (vsock only) and gets none.
+ip netns add "$ns"
+
+cg=()
+if [[ "${CGROUPS:-1}" == 1 ]]; then
+  # The parent cgroup, with the controllers the per-VM cgroup below it uses.
+  mkdir -p "/sys/fs/cgroup/$CG_PARENT"
+  echo "+memory +pids +cpu" > "/sys/fs/cgroup/$CG_PARENT/cgroup.subtree_control"
+  cg=(--cgroup-version 2 --parent-cgroup "$CG_PARENT"
+      --cgroup "memory.max=$MEM_MAX" --cgroup "pids.max=$PIDS_MAX" --cgroup "cpu.max=$CPU_MAX")
+fi
+# In the background (stdin kept for the serial console) so a signal runs the trap at once instead of
+# waiting for the VM to exit; the jailer execs into Firecracker, so $fc is Firecracker's pid.
+started=1
+"$LIB/jailer" --id "$id" --exec-file "$LIB/firecracker" --uid "$fc_uid" --gid "$fc_gid" \
+  --chroot-base-dir "$BASE" --netns "/run/netns/$ns" "${cg[@]}" --resource-limit no-file=1024 \
+  -- --no-api --config-file vm.json --level Error <&0 &
+fc=$!
+rc=0; wait "$fc" || rc=$?
+fc=""
+exit "$rc"

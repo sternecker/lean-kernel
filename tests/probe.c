@@ -22,6 +22,7 @@
 #include <sys/prctl.h>
 #include <sys/ptrace.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
@@ -448,6 +449,56 @@ static void do_traceme(void) { _exit(ptrace(PTRACE_TRACEME, 0, 0, 0) == 0 ? 0 : 
 
 // Third pass, run under guest/jail-exec. Only calls an unprivileged process could otherwise make
 // prove the filter works; root-only calls (mount, ...) fail with EPERM either way.
+#define DAC_OPEN_DIR "/probe-dac-open"
+
+// The agent policy from scripts/mkrootfs.sh's test init: jail-exec --rw /tmp --connect 8080, with
+// fd 3 open on entry. Landlock, the seccomp allowlist and the fd cleanup, seen from inside.
+static void jailed_policy(void)
+{
+	char d[96];
+	int fd = open("/tmp/probe-landlock", O_CREAT | O_WRONLY | O_TRUNC, 0600);
+	result(fd >= 0, "control: write in --rw /tmp", fd >= 0 ? "ok" : strerror(errno));
+	if (fd >= 0) {
+		close(fd);
+		unlink("/tmp/probe-landlock");
+	}
+	// DAC_OPEN_DIR is world-writable (the root pass made it), so only Landlock can refuse these.
+	errno = 0; expect_errno("landlock: create file outside --rw", open(DAC_OPEN_DIR "/f", O_CREAT | O_WRONLY, 0600), EACCES);
+	errno = 0; expect_errno("landlock: mkdir outside --rw", mkdir(DAC_OPEN_DIR "/d", 0700), EACCES);
+	fd = open("/dev/null", O_WRONLY);
+	result(fd >= 0, "control: write /dev/null", fd >= 0 ? "ok" : strerror(errno));
+	if (fd >= 0)
+		close(fd);
+
+	struct sockaddr_in sa = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+	int s = socket(AF_INET, SOCK_STREAM, 0);
+	if (s < 0) {
+		result(0, "control: AF_INET socket", strerror(errno));
+	} else {
+		sa.sin_port = htons(9);
+		errno = 0; expect_errno("landlock: TCP connect to port 9", connect(s, (struct sockaddr *)&sa, sizeof sa), EACCES);
+		close(s);
+		s = socket(AF_INET, SOCK_STREAM, 0);
+		sa.sin_port = htons(8080);
+		errno = 0;
+		long rc = connect(s, (struct sockaddr *)&sa, sizeof sa);
+		snprintf(d, sizeof d, "%s", rc == 0 ? "connected" : strerror(errno));
+		result(rc == 0 || errno != EACCES, "control: TCP connect to --connect 8080 not blocked", d);
+		close(s);
+		s = socket(AF_INET, SOCK_STREAM, 0);
+		sa.sin_port = htons(12345);
+		errno = 0; expect_errno("landlock: TCP bind", bind(s, (struct sockaddr *)&sa, sizeof sa), EACCES);
+		close(s);
+	}
+	errno = 0; expect_errno("seccomp: AF_VSOCK socket (no --vsock)", socket(AF_VSOCK, SOCK_STREAM, 0), EPERM);
+	errno = 0; expect_errno("seccomp: AF_NETLINK socket", socket(AF_NETLINK, SOCK_RAW, 0), EPERM);
+	// Not on the allowlist. Without the filter the kernel would say EPERM (not root).
+	errno = 0; expect_errno("seccomp: unlisted syscall (vhangup)", syscall(SYS_vhangup), ENOSYS);
+	errno = 0; expect_errno("seccomp: adjtimex denied", syscall(SYS_adjtimex, NULL), EPERM);
+	errno = 0; expect_errno("seccomp: pidfd_getfd denied", syscall(SYS_pidfd_getfd, 0, 0, 0), EPERM);
+	errno = 0; expect_errno("inherited fd 3 closed", fcntl(3, F_GETFD), EBADF);
+}
+
 static int jailed_checks(void)
 {
 	char d[96], buf[8] = "x";
@@ -464,10 +515,11 @@ static int jailed_checks(void)
 	if (c > 0)
 		waitpid(c, &st, 0);
 	result(c > 0 && WIFEXITED(st) && WEXITSTATUS(st) == 0, "control: fork still works", c > 0 ? "ok" : strerror(errno));
-	long fd = socket(AF_VSOCK, SOCK_STREAM, 0);
-	result(fd >= 0, "control: AF_VSOCK socket", fd >= 0 ? "ok" : strerror(errno));
+	long fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	result(fd >= 0, "control: AF_UNIX socket", fd >= 0 ? "ok" : strerror(errno));
 	if (fd >= 0)
 		close(fd);
+	jailed_policy();
 
 	struct perf_event_attr pa;
 	memset(&pa, 0, sizeof pa);
@@ -517,6 +569,10 @@ int main(int argc, char **argv)
 	rootfs_ownership();
 	jail_exec_rejects();
 	boot_sysctls();
+	// For the jailed pass: a directory file permissions would let anyone write.
+	if (mkdir(DAC_OPEN_DIR, 0777) && errno != EEXIST)
+		result(0, "setup " DAC_OPEN_DIR, strerror(errno));
+	chmod(DAC_OPEN_DIR, 0777);
 	fflush(stdout);
 
 	pid_t p = fork();

@@ -55,7 +55,8 @@ mount -t tmpfs tmp /tmp
 echo 1 > /proc/sys/kernel/printk
 /bin/probe
 echo "PROBE-EXIT=$?"
-/bin/jail-exec 65534 /bin/probe --jailed
+# The agent's policy shape; fd 3 is open so the probe can check jail-exec closes it.
+/bin/jail-exec --rw /tmp --connect 8080 65534 /bin/probe --jailed 3</etc/hostname
 echo "PROBE-JAILED-EXIT=$?"
 reboot -f
 EOF

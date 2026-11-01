@@ -130,7 +130,7 @@ make test
 Builds `tests/probe.c` and `guest/jail-exec.c` statically, puts them in a separate image
 (`out/rootfs-test.ext4`) whose init runs the probe and reboots, boots that headless with the same kernel
 command line as `make run`, and fails unless every check passes. Takes about 10 seconds after the build.
-Full console log: `out/test.log`. Expect `PROBE: root 84 / user 72 / jailed 12 passed, 0 failed`. The root pass includes the image-ownership checks, `jail-exec` bad-UID refusals, and the boot sysctls (`kptr_restrict=2`, `memfd_noexec=2`, executable memfd refused).
+Full console log: `out/test.log`. Expect `PROBE: root 84 / user 72 / jailed 25 passed, 0 failed`. The root pass includes the image-ownership checks, `jail-exec` bad-UID refusals, and the boot sysctls (`kptr_restrict=2`, `memfd_noexec=2`, executable memfd refused). The jailed pass runs with the agent's policy shape (`--rw /tmp --connect 8080`). It checks the Landlock file and TCP rules against a world-writable directory, which only Landlock can refuse. It also checks that vsock and netlink sockets and an unlisted syscall are refused, and that inherited fds are closed.
 
 The probe runs three passes: as root, as uid 65534, and as uid 65534 under `jail-exec` (§6c).
 Cut code must be gone even for root:
@@ -178,16 +178,45 @@ count as present here; `make test` checks what actually happens.
 ## 6c. Start the agent through jail-exec
 
 ```sh
-jail-exec UID COMMAND [ARGS...]      # in the guest, as root, e.g. from /init
+# in the guest, as root, e.g. from /init
+jail-exec [--rw PATH]... [--connect PORT]... [--bind PORT]... [--vsock] UID COMMAND [ARGS...]
+jail-exec --rw /home/agent --rw /tmp --connect 8080 10000 /bin/bash     # what the agent VM runs
 ```
 
-`guest/jail-exec.c` (static, no libseccomp) drops to `UID` (only 1 to 65534, digits only; it then verifies every id changed and that root can't be regained), sets `no_new_privs`, installs a
-seccomp filter, and execs the command. The filter kills any non-x86_64 or x32 syscall; returns `EPERM`
-for `perf_event_open`, `vmsplice`, ptrace and process_vm_*, file handles, fanotify, `unshare`/`setns`,
-the mount family, swap, reboot, clock setting, hostname, quota, syslog, and `clone` with namespace flags;
-and `ENOSYS` for `clone3` (its flags sit behind a pointer seccomp can't read; glibc falls back to `clone`).
-Everything else is allowed: it's a denylist until the agent's syscall set is known, then an allowlist.
-Landlock (filesystem rules) is the next layer and depends on the real rootfs layout.
+`guest/jail-exec.c` (static, no libseccomp) applies these in order and fails closed (exit 127) at any step:
+
+1. **Privilege drop.** It drops to `UID`, which must be 1 to 65534 written as plain digits. It then checks
+   that every id changed and that root can't be regained.
+2. **`no_new_privs`.**
+3. **Landlock (ABI 6 or later).**
+   - Everything is read and execute only, except `/dev`, which also allows writes and device ioctls (terminals, `/dev/null`).
+   - Each `--rw` path gets full access beneath it.
+   - The only TCP connects and binds allowed are to the `--connect` and `--bind` ports.
+   - Scoping stops the agent from signalling, or reaching abstract unix sockets of, processes outside its own domain (init, socat).
+   - With ABI 7, denials after exec go to the kernel log (`type=1423`).
+4. **File descriptors.** Every inherited fd above 2 is closed.
+5. **seccomp allowlist.** The checks run in this order:
+   - A non-x86_64 or x32 syscall kills the process.
+   - An explicit denylist returns `EPERM`: `perf_event_open`, `vmsplice`, ptrace, process_vm_*, `pidfd_getfd`,
+     `process_madvise`, `kcmp`, file handles, fanotify, `unshare`/`setns`, the mount family, swap, reboot,
+     clock setting including `adjtimex`, hostname, quota and syslog.
+   - `clone` with namespace flags returns `EPERM`. `clone3` returns `ENOSYS`, because its flags sit behind a
+     pointer seccomp can't read, and glibc falls back to `clone`.
+   - `socket()` works only for `AF_UNIX`, `AF_INET` and `AF_INET6`, plus `AF_VSOCK` with `--vsock`.
+   - Then comes the allowlist. Anything not on it returns `ENOSYS`.
+
+   Every refusal is logged (`type=1326`, `syscall=N`).
+
+The allowlist is the set of syscalls Claude Code, bash, busybox and socat were seen to make, plus close relatives
+of those calls. To redo it after a Claude Code update, or for a different agent:
+
+```sh
+STRACE=1 make agent-rootfs && AGENT_STRACE=1 TASK='...' make agent   # out/strace-agent.txt, out/strace-socat.txt
+make agent-rootfs                                                    # rebuild without strace afterwards
+```
+
+`make agent` prints what the jail refused after each headless run. Expect one `syscall=435` (`clone3`, by design)
+and one `syscall=41` (a `socket()` call from Claude Code, almost certainly netlink, which it doesn't need).
 
 ## 7. Networking (optional, sudo)
 
@@ -234,8 +263,9 @@ In order, one at a time:
 1. **Real rootfs.** `debootstrap --variant=minbase trixie` (needs sudo) or the agent's container image
    flattened to ext4. Keep it read-only (`is_read_only: true` in `vm/vm.json.in`) and give the agent a
    separate scratch drive.
-2. **Jailer.** Run Firecracker under `bin/.../jailer-*` (chroot, cgroups, its own seccomp on the VMM
-   process). The VMM is host-side code the guest talks to; it deserves its own jail.
+2. **Jailer.** Run Firecracker under the jailer (chroot, cgroups, its own seccomp on the VMM
+   process). The VMM is host-side code the guest talks to; it deserves its own jail. For the agent VM
+   this is set up: `sudo scripts/jail-setup.sh`, see 9.5.
    Copy `out/bzImage` into the chroot, not `vmlinux`: KASLR only happens on the bzImage path.
 3. **Egress.** vsock from guest to a host-side proxy, or the tap to an Envoy pod with
    default-deny NetworkPolicy. Allowlist by destination first, then per-tool method/path/size via
@@ -259,7 +289,14 @@ The guest holds only a placeholder token. The proxy swaps in the real one, forwa
 and `/v1/messages/count_tokens`, and logs one line per request to `out/agent-proxy.log`. It also rejects any
 request that asks Anthropic's servers to reach out for the agent: server tools (`web_fetch`, `web_search`, code
 execution) and `mcp_servers`. Otherwise a URL with data in its query string would be a way out. Claude Code's WebSearch
-tool is therefore unavailable in the VM. In the guest, `/proc` is `hidepid=invisible`, so the agent sees only its own
+tool is therefore unavailable in the VM.
+Each session (one proxy process) also has a budget: 500 requests, 50M input tokens (cache reads included), 1M output
+tokens and 60 requests a minute, with an optional model allowlist. Change them with `AGENT_MAX_REQUESTS`,
+`AGENT_MAX_INPUT_TOKENS`, `AGENT_MAX_OUTPUT_TOKENS`, `AGENT_RPM` and `AGENT_MODELS='claude-sonnet-*'` (0 = unlimited).
+Each forwarded request's log line shows its tokens and the running total, and the log ends with a session summary.
+A Claude Code request costs about 16k input tokens, almost all of it cached system prompt and tool definitions.
+Over budget, the agent gets a 403 (which Claude Code labels "Failed to authenticate") and stops. Over the rate,
+it gets a 429 and backs off. In the guest, `/proc` is `hidepid=invisible`, so the agent sees only its own
 processes, and the agent runs with `umask 077`. The guest has no other
 route out. Root is read-only. `/home/agent` is a fresh 512 MB scratch drive each run (`KEEP_SCRATCH=1` keeps it).
 `/tmp` and `/home/agent` are mounted `noexec`. With `vm.memfd_noexec=2` and no interpreter in the image that
@@ -267,8 +304,33 @@ loads native code, the agent can't run a binary it wrote, which is what most ker
 lifts this for workloads that build and run code. The protection weakens once the image gains Python, Node or a compiler.
 VM memory is 2 GB. This needs the default kernel profile, because `VSOCK_ONLY=1` also removes loopback TCP.
 
-Not yet: the proxy runs unjailed as your user. Firecracker isn't under the jailer (9.2). Claude Code is the host's
-binary, not a pinned version.
+**Jailed (9.2).** Run `sudo scripts/jail-setup.sh` once, and `make agent` uses the jail from then on. `JAIL=0`
+runs unjailed and `JAIL=1` refuses to run without the jail. What the setup installs:
+- The users `lean-fc` and `lean-proxy`.
+- Root-owned copies of the jailer and Firecracker from the pinned release tarball, in `/usr/local/lib/lean-agent`.
+  Root never runs the ones in `bin/`, because you can write to that directory.
+- The wrapper, `/usr/local/sbin/lean-agent-jail`.
+- `/etc/lean-agent.conf`.
+- A sudoers rule that lets you run only that wrapper without a password.
+
+Each run gets a fresh chroot under `/srv/lean-agent/firecracker/<id>/root`:
+- **Firecracker** runs as `lean-fc` in an empty network namespace, so it has no route anywhere. A cgroup caps it
+  at 2.5 GiB of memory, 64 pids and 2 CPUs, and the jailer applies an fd limit and Firecracker's own seccomp filter.
+- **The proxy** runs as `lean-proxy`, with no groups, no capabilities and `no_new_privs`. The wrapper pipes the
+  token to it, so `lean-proxy` never needs access to your home directory, which is mode 710 anyway.
+- **Inputs:** the wrapper reads the kernel, images, config and proxy script as you and copies them into the jail,
+  so root never reads a file for it that you couldn't.
+- **Cleanup:** the scratch drive is copied back to `out/` for `KEEP_SCRATCH=1`, and everything else is removed.
+
+`sudo lean-agent-jail --check` verifies the installation. After editing `scripts/lean-agent-jail`, run
+`sudo scripts/jail-setup.sh` again; `sudo scripts/jail-setup.sh uninstall` removes it all. Changes to the proxy
+take effect without reinstalling, because the wrapper copies `scripts/api-proxy.py` into the jail on every run.
+
+Not yet:
+- The proxy has full host network access instead of a namespace whose only route is upstream.
+- Firecracker isn't in its own PID namespace: `--new-pid-ns` makes the jailer exit early, so the wrapper
+  couldn't wait for the VM.
+- Claude Code is the host's binary, not a pinned version.
 
 ## Troubleshooting
 
