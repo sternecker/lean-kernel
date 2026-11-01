@@ -8,3 +8,4 @@ rootfs/
 vm/vm.json
 /firecracker.sock
 /vsock.sock
+out-*/

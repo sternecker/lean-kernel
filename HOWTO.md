@@ -130,7 +130,10 @@ make test
 Builds `tests/probe.c` and `guest/jail-exec.c` statically, puts them in a separate image
 (`out/rootfs-test.ext4`) whose init runs the probe and reboots, boots that headless with the same kernel
 command line as `make run`, and fails unless every check passes. Takes about 10 seconds after the build.
-Full console log: `out/test.log`. Expect `PROBE: root 84 / user 72 / jailed 25 passed, 0 failed`. The root pass includes the image-ownership checks, `jail-exec` bad-UID refusals, and the boot sysctls (`kptr_restrict=2`, `memfd_noexec=2`, executable memfd refused). The jailed pass runs with the agent's policy shape (`--rw /tmp --connect 8080`). It checks the Landlock file and TCP rules against a world-writable directory, which only Landlock can refuse. It also checks that vsock and netlink sockets and an unlisted syscall are refused, and that inherited fds are closed.
+Full console log: `out/test.log`. Expect `PROBE: root 96 / user 83 / jailed 29 passed, 0 failed` (vsock-only: `jailed 27`). Both passes start with checks that `/proc`, `/sys` and `/dev` are actually mounted, so a failed mount can't make the
+"absent" checks pass. The vsock-only build gets `probe_profile=vsock` on its kernel command line and asserts that
+IPv4 is gone. To test that profile without touching `out/`, run `VSOCK_ONLY=1 LEAN_OUT=$PWD/out-vsock make config build test`.
+The root pass includes the image-ownership checks, `jail-exec` bad-UID refusals, and the boot sysctls (`kptr_restrict=2`, `memfd_noexec=2`, executable memfd refused). The jailed pass runs with the agent's policy shape (`--rw /tmp --connect 8080`). It checks the Landlock file and TCP rules against a world-writable directory, which only Landlock can refuse. It also checks that vsock and netlink sockets and an unlisted syscall are refused, and that inherited fds are closed.
 
 The probe runs three passes: as root, as uid 65534, and as uid 65534 under `jail-exec` (§6c).
 Cut code must be gone even for root:
@@ -185,11 +188,16 @@ jail-exec --rw /home/agent --rw /tmp --connect 8080 10000 /bin/bash     # what t
 
 `guest/jail-exec.c` (static, no libseccomp) applies these in order and fails closed (exit 127) at any step:
 
-1. **Privilege drop.** It drops to `UID`, which must be 1 to 65534 written as plain digits. It then checks
-   that every id changed and that root can't be regained.
+1. **Privilege drop.** It empties the capability bounding and ambient sets, then drops to `UID`, which must be
+   1 to 65534 written as plain digits. It clears every capability set, then checks that every id changed, that
+   no capability is left in any set, and that root can't be regained.
 2. **`no_new_privs`.**
 3. **Landlock (ABI 6 or later).**
-   - Everything is read and execute only, except `/dev`, which also allows writes and device ioctls (terminals, `/dev/null`).
+   - Everything outside `/dev` is read and execute only.
+   - In `/dev` the agent can open only `null`, `zero`, `full`, `random`, `urandom`, `tty`, `ptmx`, `/dev/pts` and
+     the terminal it was started on, with read, write and ioctl. It can't open `kmsg`, `hwrng`, `cpu_dma_latency`,
+     the disks or `vsock`. Landlock rules only ever add access, so read access is granted per top-level entry
+     instead of on `/`, because a rule on `/` would cover `/dev` too.
    - Each `--rw` path gets full access beneath it.
    - The only TCP connects and binds allowed are to the `--connect` and `--bind` ports.
    - Scoping stops the agent from signalling, or reaching abstract unix sockets of, processes outside its own domain (init, socat).
@@ -243,10 +251,18 @@ scripts/fetch-kernel.sh --check
 
 Prints `up to date` or `BEHIND: pinned X, current longterm Y`. When behind:
 
-1. Edit `VERSION`: `KERNEL_VERSION=<new>`.
+1. Edit `VERSION`: set `KERNEL_VERSION=<new>`, then run `scripts/fetch-kernel.sh --pin` and copy the
+   `KERNEL_SHA256=` line it prints into `VERSION`. It reports whether the signature on kernel.org's
+   `sha256sums.asc` checked out. That only works if gpg has the kernel.org autosigner key
+   (`gpg --locate-keys autosigner@kernel.org`, once). `make fetch` refuses any tarball that doesn't match the pin.
 2. `rm -f out/scripts/basic/randstruct.seed` so the new kernel gets a fresh RANDSTRUCT layout (the
    seed otherwise survives every rebuild; see NOTES §5). Then `make fetch config build check` and
-   reboot-test with `make run`.
+   reboot-test with `make run`:
+   - `make config` fails on any fragment line that didn't take, including a cut whose symbol no longer
+     exists (renamed upstream).
+   - `make build` fails if the config it builds isn't byte-identical to the one `make config` verified.
+     That happens when the toolchain changed, which can silently drop CFI, RANDSTRUCT, KSTACK_ERASE and LTO.
+   - `make check` fails on any hardening-checker FAIL that isn't in `configs/checker-accepted.txt`.
 3. Commit `VERSION` and the `.config` diff (`out/lean-<ver>.config` is copied for exactly this; diff it
    against the previous one before committing).
 
@@ -304,6 +320,26 @@ loads native code, the agent can't run a binary it wrote, which is what most ker
 lifts this for workloads that build and run code. The protection weakens once the image gains Python, Node or a compiler.
 VM memory is 2 GB. This needs the default kernel profile, because `VSOCK_ONLY=1` also removes loopback TCP.
 
+**Checking the agent VM: `make agent-test`.** It boots the real agent image, but doesn't start Claude Code, and nothing it
+sends is forwarded upstream, so it spends no tokens.
+- **As root, from init:** the mount options (read-only root, noexec `/tmp` and home, `hidepid`, read-only `/sys`),
+  the boot sysctls and the bridge.
+- **As the agent, under the same `jail-exec` policy the agent gets:**
+  - no capabilities and only its own processes visible;
+  - `/dev/kmsg` refused;
+  - no exec of a binary it wrote;
+  - no TCP connect except to port 8080;
+  - the proxy refusing an off-allowlist path, `web_fetch`, `mcp_servers` and a non-JSON body.
+
+Run it after changing the image, `jail-exec`, the proxy or the wrapper.
+
+**Claude Code is pinned.** `CLAUDE_CODE_VERSION` and `CLAUDE_CODE_SHA256` in `VERSION` set the version. The image build takes it
+from the host's native install and caches it in `work/claude-code/`, since the installer prunes old versions. A newer
+host version is noted and ignored. To bump:
+1. Install the new version on the host.
+2. Run `scripts/mkrootfs-agent.sh --pin <version>` and copy the two lines it prints into `VERSION`.
+3. Redo the syscall trace (6c), because the allowlist was traced against the old version.
+
 **Jailed (9.2).** Run `sudo scripts/jail-setup.sh` once, and `make agent` uses the jail from then on. `JAIL=0`
 runs unjailed and `JAIL=1` refuses to run without the jail. What the setup installs:
 - The users `lean-fc` and `lean-proxy`.
@@ -326,8 +362,12 @@ Each run gets a fresh chroot under `/srv/lean-agent/firecracker/<id>/root`:
 `sudo scripts/jail-setup.sh` again; `sudo scripts/jail-setup.sh uninstall` removes it all. Changes to the proxy
 take effect without reinstalling, because the wrapper copies `scripts/api-proxy.py` into the jail on every run.
 
+**Proxy egress.** The wrapper resolves `api.anthropic.com` as root and passes the addresses to the proxy, which connects
+to them directly. It still verifies TLS for the name, so it needs no DNS. The nftables table `inet lean_agent`, created on
+the first jailed run and removed by uninstall, lets uid `lean-proxy` open TCP 443 to those addresses and rejects
+everything else it sends. Firecracker also gets a file size limit (`fsize`): the scratch drive plus 64 MiB.
+
 Not yet:
-- The proxy has full host network access instead of a namespace whose only route is upstream.
 - Firecracker isn't in its own PID namespace: `--new-pid-ns` makes the jailer exit early, so the wrapper
   couldn't wait for the VM.
 - Claude Code is the host's binary, not a pinned version.
@@ -345,6 +385,10 @@ Not yet:
 
 ## Accepted checker failures
 
+`make check` enforces this list, which lives in `configs/checker-accepted.txt` (option, which build, reason).
+The checker itself is pinned (`KHC_COMMIT` in `VERSION`). To bump it, review its diff first, set the new commit,
+and rerun `make check`.
+
 Recorded 2026-10-31 against 6.18.58. First run (gcc): 50 FAILs. Now clang 22 (default): 15. gcc 14.2 (`LLVM=0`): 20.
 clang is the default because it is the safer build: it adds CFI, RANDSTRUCT and KSTACK_ERASE, and it passed
 the same boot test (self-test all absent, kCFI active, KASLR offsets differ per boot, clean dmesg).
@@ -354,7 +398,7 @@ runs during boot-time alternatives patching (it would also run on module load, b
 Not applicable to a no-PCI virtio-mmio guest:
 - `X86_MCE`, `X86_MCE_INTEL`, `X86_MCE_AMD`: Firecracker doesn't forward machine checks; the host handles hardware errors.
 - `INTEL_IOMMU`, `AMD_IOMMU`, `INTEL_IOMMU_DEFAULT_ON`, `INTEL_IOMMU_SVM`: no IOMMU is exposed to the guest.
-- `HW_RANDOM_TPM`: no TPM. Entropy comes from virtio-rng.
+- `HW_RANDOM_TPM`: no TPM. Boot entropy comes from `random.trust_cpu=on` (RDRAND); no virtio-rng device is configured.
 - `WERROR`: build-time only. It buys nothing at runtime and could break a build on a newer compiler.
 
 Chosen LSM stack (landlock, lockdown, yama):
@@ -367,6 +411,7 @@ Checker naming lag (clang build):
 
 Compiler-specific:
 - `GCC_PLUGIN_LATENT_ENTROPY`: gcc plugins only; no clang equivalent. Boot entropy comes from
-  `random.trust_cpu=on` (RDRAND) and virtio-rng.
+  `random.trust_cpu=on` (RDRAND). The virtio-rng driver is built in but `vm/vm.json.in` configures no
+  entropy device (Firecracker's `"entropy": {}` would add one, at the cost of one more emulated device).
 - gcc build only: `RANDSTRUCT_FULL`, `KSTACK_ERASE` (+`_METRICS`, `_RUNTIME_DISABLE`), `CFI_*`. These need
   clang (or gcc plugin headers, `gcc-14-plugin-dev`, for the first two). All are on in the default clang build.

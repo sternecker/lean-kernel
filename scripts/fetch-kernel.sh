@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Download the pinned longterm kernel tarball, verify sha256 against kernel.org's list, extract.
+# Download the pinned longterm kernel tarball, verify it against KERNEL_SHA256 in VERSION and against
+# kernel.org's list, extract.
 # --check: compare VERSION to the current longterm release for the series and exit 1 if behind.
+# --pin:   print the KERNEL_SHA256 line for the version in VERSION (for a bump).
 source "$(dirname "$0")/_env.sh"
 
 if [[ "${1:-}" == "--check" ]]; then
-  cur="$(curl -sS https://www.kernel.org/releases.json | python3 -c '
+  cur="$(curl -fsS https://www.kernel.org/releases.json | python3 -c '
 import json,sys
 series=sys.argv[1]
 for r in json.load(sys.stdin)["releases"]:
@@ -15,7 +17,7 @@ for r in json.load(sys.stdin)["releases"]:
   if [[ "$cur" == "$KERNEL_VERSION" ]]; then
     echo "up to date: $KERNEL_VERSION"
   else
-    echo "BEHIND: pinned $KERNEL_VERSION, current longterm $cur. Bump VERSION, then make fetch config build check."
+    echo "BEHIND: pinned $KERNEL_VERSION, current longterm $cur. Bump VERSION (scripts/fetch-kernel.sh --pin), then make fetch config build check."
     exit 1
   fi
   exit 0
@@ -24,13 +26,72 @@ fi
 mkdir -p "$WORK"
 tar="$WORK/linux-$KERNEL_VERSION.tar.xz"
 sums="$WORK/sha256sums.asc"
-[[ -f "$tar" ]] || { note "downloading linux-$KERNEL_VERSION"; curl -sSL -o "$tar" "$KERNEL_URL/linux-$KERNEL_VERSION.tar.xz"; }
-curl -sSL -o "$sums" "$KERNEL_URL/sha256sums.asc"
-expected="$(grep " linux-$KERNEL_VERSION.tar.xz\$" "$sums" | awk '{print $1}')"
-[[ -n "$expected" ]] || die "linux-$KERNEL_VERSION.tar.xz not in kernel.org sha256sums"
-echo "$expected  $tar" | sha256sum -c - || die "kernel tarball sha256 mismatch"
-if [[ ! -d "$SRC" ]]; then
+# Downloads go to a .part file and are moved into place only when complete: a failed or partial
+# download (or an HTML error page: -f) never sits at the final path.
+fetch() { curl -fsSL --retry 2 -o "$2.part" "$1" && mv -f -- "$2.part" "$2"; }
+
+# kernel.org's sha256 list. It's clearsigned by the kernel.org checksum autosigner; gpg checks that
+# signature if the key is in your keyring (gpg --locate-keys autosigner@kernel.org fetches it over WKD).
+kernel_org_sum() {
+  fetch "$KERNEL_URL/sha256sums.asc" "$sums" || return 1
+  grep " linux-$KERNEL_VERSION.tar.xz\$" "$sums" | awk '{print $1}'
+}
+sig_status() {
+  command -v gpg >/dev/null || { echo "not checked (no gpg)"; return; }
+  if gpg --batch --quiet --verify "$sums" 2>/dev/null; then echo "good signature"
+  else echo "not verified (no key, or a bad signature: gpg --verify $sums)"; fi
+}
+
+if [[ "${1:-}" == "--pin" ]]; then
+  sum="$(kernel_org_sum)" || die "can't download $KERNEL_URL/sha256sums.asc"
+  [[ -n "$sum" ]] || die "linux-$KERNEL_VERSION.tar.xz not in kernel.org sha256sums"
+  echo "kernel.org sha256sums.asc signature: $(sig_status)"
+  echo "put this in VERSION:"
+  echo "KERNEL_SHA256=$sum"
+  exit 0
+fi
+
+# The pin in VERSION is what counts; kernel.org's list is a second, independent check.
+[[ "${KERNEL_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] || die "VERSION has no KERNEL_SHA256 for $KERNEL_VERSION; run scripts/fetch-kernel.sh --pin"
+pinned_ok() { echo "$KERNEL_SHA256  $1" | sha256sum -c --quiet - >/dev/null 2>&1; }
+if [[ -f "$tar" ]] && ! pinned_ok "$tar"; then
+  note "cached $(basename "$tar") doesn't match KERNEL_SHA256; downloading it again"
+  rm -f -- "$tar"
+fi
+if [[ ! -f "$tar" ]]; then
+  note "downloading linux-$KERNEL_VERSION"
+  fetch "$KERNEL_URL/linux-$KERNEL_VERSION.tar.xz" "$tar.dl" || die "download failed"
+  pinned_ok "$tar.dl" || { rm -f -- "$tar.dl"; die "downloaded tarball does not match KERNEL_SHA256"; }
+  mv -f -- "$tar.dl" "$tar"
+fi
+echo "$(basename "$tar"): matches KERNEL_SHA256"
+sum="$(kernel_org_sum)" || sum=""
+if [[ -z "$sum" ]]; then
+  echo "warn: couldn't get kernel.org's sha256sums entry for it; relying on the pin"
+elif [[ "$sum" != "$KERNEL_SHA256" ]]; then
+  die "kernel.org's sha256sums disagrees with KERNEL_SHA256 for linux-$KERNEL_VERSION.tar.xz"
+else
+  echo "kernel.org sha256sums agrees (signature: $(sig_status))"
+fi
+
+# Extract into a temporary directory, move it into place, then mark it complete, so an interrupted
+# extraction can never pass for a source tree. A tree from before the marker existed is compared
+# against the tarball once instead of being replaced.
+marker="$SRC/.lean-kernel-extracted"
+if [[ -f "$marker" && "$(cat "$marker")" == "$KERNEL_SHA256" ]]; then
+  :
+elif [[ -d "$SRC" && ! -f "$marker" ]] && tar --compare -xJf "$tar" -C "$WORK" >/dev/null 2>&1; then
+  echo "$KERNEL_SHA256" > "$marker"
+  note "existing source tree matches the tarball"
+else
   note "extracting"
-  tar xJf "$tar" -C "$WORK"
+  tmp="$WORK/.extract.$$"
+  rm -r -f -- "$tmp"; mkdir -p "$tmp"
+  tar xJf "$tar" -C "$tmp" || { rm -r -f -- "$tmp"; die "extraction failed"; }
+  [[ -d "$tmp/linux-$KERNEL_VERSION" ]] || { rm -r -f -- "$tmp"; die "tarball has no linux-$KERNEL_VERSION/"; }
+  rm -r -f -- "$SRC"
+  mv -- "$tmp/linux-$KERNEL_VERSION" "$SRC"
+  rmdir -- "$tmp"
+  echo "$KERNEL_SHA256" > "$marker"
 fi
 echo "source: $SRC"

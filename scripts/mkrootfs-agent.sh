@@ -10,13 +10,40 @@
 #
 # STRACE=1 also puts strace in the image, for AGENT_STRACE=1 make agent: init then traces the agent and
 # the bridge from outside the jail and prints which syscalls they made (input for jail-exec's allowlist).
-# CLAUDE_BIN=<path> overrides the Claude Code binary (default: resolved from `command -v claude`).
+# Claude Code is the version pinned in VERSION (CLAUDE_CODE_VERSION + CLAUDE_CODE_SHA256), taken from the
+# host's native install (~/.local/share/claude/versions/<version>) and cached in work/claude-code/ once
+# verified, since the installer prunes old versions. CLAUDE_BIN=<path> uses another file; it must still
+# match the pin. --pin <version> prints the VERSION lines for a host-installed version.
 source "$(dirname "$0")/_env.sh"
 
 AGENT_UID="${AGENT_UID:-10000}"
 size_mb="${AGENT_ROOTFS_MB:-640}"
-claude_bin="${CLAUDE_BIN:-$(readlink -f "$(command -v claude)" 2>/dev/null || true)}"
-[[ -x "$claude_bin" ]] || die "Claude Code binary not found; install it or set CLAUDE_BIN"
+host_versions="$HOME/.local/share/claude/versions"
+if [[ "${1:-}" == "--pin" ]]; then
+  v="${2:?usage: $0 --pin <version>}"
+  [[ -f "$host_versions/$v" ]] || die "$host_versions/$v not found; install that version of Claude Code first"
+  echo "put these in VERSION (then redo the syscall trace, HOWTO 6c):"
+  echo "CLAUDE_CODE_VERSION=$v"
+  echo "CLAUDE_CODE_SHA256=$(sha256sum "$host_versions/$v" | cut -d' ' -f1)"
+  exit 0
+fi
+[[ "${CLAUDE_CODE_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] || die "VERSION has no CLAUDE_CODE_SHA256"
+cache="$WORK/claude-code/$CLAUDE_CODE_VERSION"
+pin_ok() { echo "$CLAUDE_CODE_SHA256  $1" | sha256sum -c --quiet - >/dev/null 2>&1; }
+claude_bin=""
+for c in ${CLAUDE_BIN:+"$CLAUDE_BIN"} "$cache" "$host_versions/$CLAUDE_CODE_VERSION"; do
+  [[ -f "$c" ]] || continue
+  if pin_ok "$c"; then claude_bin="$c"; break; fi
+  echo "warn: $c does not match CLAUDE_CODE_SHA256; skipping it" >&2
+done
+[[ -n "$claude_bin" ]] || die "no Claude Code $CLAUDE_CODE_VERSION matching CLAUDE_CODE_SHA256 (looked in ${CLAUDE_BIN:+$CLAUDE_BIN, }$cache, $host_versions/$CLAUDE_CODE_VERSION)"
+if [[ "$claude_bin" != "$cache" ]]; then
+  mkdir -p "$(dirname "$cache")"; cp -- "$claude_bin" "$cache.tmp" && mv -f -- "$cache.tmp" "$cache"
+  claude_bin="$cache"
+fi
+host_now="$(readlink -f "$(command -v claude 2>/dev/null)" 2>/dev/null || true)"
+[[ -n "$host_now" && "$(basename "$host_now")" != "$CLAUDE_CODE_VERSION" ]] \
+  && echo "note: the host runs Claude Code $(basename "$host_now"); the image uses the pinned $CLAUDE_CODE_VERSION"
 bb="$(command -v busybox)" || die "busybox not installed (apt install busybox-static)"
 socat_bin="$(command -v socat)" || die "socat not installed (apt install socat)"
 bash_bin="$(readlink -f /bin/bash)"
@@ -40,12 +67,13 @@ cp "$bash_bin" "$stage/bin/bash";        copy_libs "$bash_bin"
 cp "$socat_bin" "$stage/usr/bin/socat";  copy_libs "$socat_bin"
 cp "$claude_bin" "$stage/usr/local/bin/claude"; copy_libs "$claude_bin"
 cp "$OUT/jail-exec" "$stage/bin/jail-exec"
+cp "$ROOT/guest/agent-selftest.sh" "$stage/bin/agent-selftest"
 if [[ "${STRACE:-0}" == "1" ]]; then
   strace_bin="$(command -v strace)" || die "STRACE=1 but strace is not installed"
   cp "$strace_bin" "$stage/usr/bin/strace"; copy_libs "$strace_bin"
 fi
 for a in sh mount umount ls cat echo ip mkdir rm cp mv ln chmod touch env id ps dmesg uname cut grep \
-         sed awk head tail sort uniq wc tr find xargs sleep date hostname stty setsid tty reboot true false \
+         sed awk head tail sort uniq wc tr find xargs sleep date hostname stty setsid tty stat reboot true false \
          printf test which basename dirname readlink tee diff vi less clear; do
   ln -sf busybox "$stage/bin/$a"
 done
@@ -74,7 +102,7 @@ cat >> "$stage/init" <<'EOF'
 fail() { echo "AGENT-EXIT=init: $*"; reboot -f; }
 # hidepid=invisible: the agent sees only its own processes, not init, socat or other uids.
 mount -t proc -o nosuid,nodev,noexec,hidepid=invisible proc /proc || fail "mount /proc"
-mount -t sysfs -o nosuid,nodev,noexec sys /sys || fail "mount /sys"
+mount -t sysfs -o ro,nosuid,nodev,noexec sys /sys || fail "mount /sys"
 # The kernel mounts devtmpfs on /dev itself (DEVTMPFS_MOUNT); remount it nosuid,noexec.
 mount -o remount,nosuid,noexec /dev || fail "remount /dev"
 mkdir -p /dev/pts && mount -t devpts -o nosuid,noexec,mode=620,ptmxmode=666 devpts /dev/pts || fail "mount /dev/pts"
@@ -106,13 +134,22 @@ done
 
 cd /home/agent
 umask 077   # inherited by the agent: files it creates are private to it
+# The agent's jail, used for the agent and for the self-test alike so the test sees the real policy.
+JAIL="/bin/jail-exec --rw /home/agent --rw /tmp --connect 8080 $AGENT_UID"
 set -- env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/agent USER=agent LOGNAME=agent SHELL=/bin/bash \
   TERM="${agent_term:-xterm-256color}" LANG=C.UTF-8 \
   ANTHROPIC_BASE_URL=http://127.0.0.1:8080 \
   CLAUDE_CODE_OAUTH_TOKEN=placeholder-real-token-is-added-by-the-host-proxy \
   DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
-  /bin/jail-exec --rw /home/agent --rw /tmp --connect 8080 "$AGENT_UID"
-if [ "$agent_mode" = headless ]; then
+  $JAIL
+if [ "$agent_mode" = selftest ]; then
+  # make agent-test: hardening checks, no Claude Code, nothing forwarded upstream.
+  echo "AGENT-START"
+  AGENT_UID=$AGENT_UID agent_exec=$agent_exec /bin/bash /bin/agent-selftest root; r1=$?
+  env -i PATH=/usr/bin:/bin HOME=/home/agent AGENT_UID=$AGENT_UID agent_exec=$agent_exec \
+    $JAIL /bin/bash /bin/agent-selftest agent; r2=$?
+  echo; echo "AGENT-EXIT=$((r1 + r2))"
+elif [ "$agent_mode" = headless ]; then
   echo "AGENT-START"
   $T "$@" /bin/bash -c 'claude -p "$(cat /home/agent/.task)" --allowedTools "$(cat /home/agent/.tools)" </dev/null 2>&1'
   rc=$?; echo; echo "AGENT-EXIT=$rc"   # own line: claude may leave a terminal escape unterminated

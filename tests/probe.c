@@ -146,6 +146,23 @@ static void cut_syscalls(void)
 	expect_errno("swapon (SWAP)", syscall(SYS_swapon, "/nonexistent", 0), ENOSYS);
 	expect_errno("swapoff (SWAP)", syscall(SYS_swapoff, "/nonexistent"), ENOSYS);
 	expect_errno("acct (BSD_PROCESS_ACCT)", syscall(SYS_acct, NULL), ENOSYS);
+	char b2[2];
+	struct iovec l = { b2, 1 }, r = { b2 + 1, 1 };
+	expect_errno("process_vm_readv (CROSS_MEMORY_ATTACH)", syscall(SYS_process_vm_readv, getpid(), &l, 1, &r, 1, 0), ENOSYS);
+	expect_errno("process_vm_writev (CROSS_MEMORY_ATTACH)", syscall(SYS_process_vm_writev, getpid(), &l, 1, &r, 1, 0), ENOSYS);
+	expect_errno("fanotify_init (FANOTIFY)", syscall(SYS_fanotify_init, 0, 0), ENOSYS);
+	struct { unsigned int bytes; int type; unsigned char h[128]; } fh = { 128, 0, {0} };
+	int mnt;
+	expect_errno("name_to_handle_at (FHANDLE)", syscall(SYS_name_to_handle_at, AT_FDCWD, "/", &fh, &mnt, 0), ENOSYS);
+	expect_errno("open_by_handle_at (FHANDLE)", syscall(SYS_open_by_handle_at, AT_FDCWD, &fh, 0), ENOSYS);
+}
+
+// scripts/test.sh puts probe_profile=vsock on the kernel command line for the VSOCK_ONLY=1 build;
+// the kernel hands unknown key=value parameters to init as environment variables.
+static int vsock_only(void)
+{
+	const char *p = getenv("probe_profile");
+	return p && strcmp(p, "vsock") == 0;
 }
 
 static void cut_sockets(void)
@@ -154,7 +171,10 @@ static void cut_sockets(void)
 	expect_no_socket("AF_INET6", AF_INET6, SOCK_STREAM, 0, EAFNOSUPPORT);
 	expect_no_socket("netlink XFRM", AF_NETLINK, SOCK_RAW, NETLINK_XFRM, EPROTONOSUPPORT);
 	expect_no_socket("netlink NETFILTER", AF_NETLINK, SOCK_RAW, NETLINK_NETFILTER, EPROTONOSUPPORT);
-	expect_no_socket("IPPROTO_MPTCP", AF_INET, SOCK_STREAM, IPPROTO_MPTCP, EPROTONOSUPPORT);
+	// With INET cut (vsock-only) the whole family is gone, so the answer is EAFNOSUPPORT.
+	expect_no_socket("IPPROTO_MPTCP", AF_INET, SOCK_STREAM, IPPROTO_MPTCP, vsock_only() ? EAFNOSUPPORT : EPROTONOSUPPORT);
+	if (vsock_only())
+		expect_no_socket("AF_INET (vsock-only profile)", AF_INET, SOCK_STREAM, 0, EAFNOSUPPORT);
 }
 
 static void cut_files(void)
@@ -211,10 +231,13 @@ static void positive_controls(void)
 	if (fd >= 0)
 		close(fd);
 
-	fd = socket(AF_INET, SOCK_STREAM, 0);
-	info("AF_INET socket", fd >= 0 ? "available (tap profile)" : "unavailable (vsock-only profile)");
-	if (fd >= 0)
-		close(fd);
+	if (!vsock_only()) {
+		fd = socket(AF_INET, SOCK_STREAM, 0);
+		snprintf(d, sizeof d, "%s", fd >= 0 ? "ok" : strerror(errno));
+		result(fd >= 0, "control: AF_INET socket (default profile)", d);
+		if (fd >= 0)
+			close(fd);
+	}
 
 	long abi = syscall(SYS_landlock_create_ruleset, NULL, 0, 1 /* LANDLOCK_CREATE_RULESET_VERSION */);
 	if (abi > 0)
@@ -275,14 +298,10 @@ static void unpriv_checks(void)
 	result(code == EPERM, "ptrace sibling (yama)", d);
 
 	// Root-only syscalls that are still compiled in: capability checks are what stop the agent.
-	struct { unsigned int bytes; int type; unsigned char h[128]; } fh = { 128, 0, {0} };
-	int mnt;
-	syscall(SYS_name_to_handle_at, AT_FDCWD, "/", &fh, &mnt, 0);
 	errno = 0; expect_errno("unshare(CLONE_NEWNS)", unshare(CLONE_NEWNS), EPERM);
 	errno = 0; expect_errno("mount tmpfs", mount("none", "/tmp", "tmpfs", 0, NULL), EPERM);
 	errno = 0; expect_errno("fsopen", syscall(SYS_fsopen, "tmpfs", 0), EPERM);
 	errno = 0; expect_errno("chroot", chroot("/tmp"), EPERM);
-	errno = 0; expect_errno("open_by_handle_at", syscall(SYS_open_by_handle_at, AT_FDCWD, &fh, 0), EPERM);
 	errno = 0; expect_errno("settimeofday", syscall(SYS_settimeofday, NULL, NULL), EPERM);
 	errno = 0; expect_errno("reboot", syscall(SYS_reboot, 0xfee1dead, 672274793, 0x4321fedc, NULL), EPERM);
 	errno = 0; expect_errno("init pid ptrace", ptrace(PTRACE_ATTACH, 1, 0, 0), EPERM);
@@ -333,14 +352,6 @@ static void surface_report(void)
 		errno = 0; reach("vmsplice", syscall(SYS_vmsplice, p[1], &iov, 1, 0));
 		close(p[0]); close(p[1]);
 	}
-	errno = 0; fd = syscall(SYS_fanotify_init, 0, 0);
-	reach("fanotify_init", fd);
-	if (fd >= 0) close(fd);
-	struct { unsigned int bytes; int type; unsigned char h[128]; } fh = { 128, 0, {0} };
-	int mnt;
-	errno = 0; reach("name_to_handle_at", syscall(SYS_name_to_handle_at, AT_FDCWD, "/", &fh, &mnt, 0));
-	struct iovec l = { buf, 1 }, r = { buf + 1, 1 };
-	errno = 0; reach("process_vm_readv (self)", syscall(SYS_process_vm_readv, getpid(), &l, 1, &r, 1, 0));
 	errno = 0; fd = syscall(SYS_memfd_secret, 0);
 	reach("memfd_secret", fd);
 	if (fd >= 0) close(fd);
@@ -434,8 +445,22 @@ static void boot_sysctls(void)
 	}
 }
 
+// Every "absent" check is an ENOENT; a /proc, /sys or /dev that failed to mount would pass them all
+// without testing anything. Things that must exist on each, checked first.
+static void mount_controls(void)
+{
+	static const char *const present[] = { "/proc/self/status", "/proc/sys/kernel/osrelease",
+					       "/sys/kernel", "/sys/devices/system/cpu", "/dev/null", "/dev/vda" };
+	for (size_t i = 0; i < sizeof present / sizeof *present; i++) {
+		char name[96];
+		snprintf(name, sizeof name, "control: present %s", present[i]);
+		result(access(present[i], F_OK) == 0, name, access(present[i], F_OK) == 0 ? "ok" : strerror(errno));
+	}
+}
+
 static void run_all(void)
 {
+	mount_controls();
 	cut_syscalls();
 	cut_sockets();
 	cut_files();
@@ -472,7 +497,12 @@ static void jailed_policy(void)
 
 	struct sockaddr_in sa = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
 	int s = socket(AF_INET, SOCK_STREAM, 0);
-	if (s < 0) {
+	if (vsock_only()) {
+		// No TCP/IP at all: the Landlock TCP rules have nothing to act on.
+		result(s < 0 && errno == EAFNOSUPPORT, "no AF_INET (vsock-only profile)", s < 0 ? strerror(errno) : "socket created");
+		if (s >= 0)
+			close(s);
+	} else if (s < 0) {
 		result(0, "control: AF_INET socket", strerror(errno));
 	} else {
 		sa.sin_port = htons(9);
@@ -497,6 +527,39 @@ static void jailed_policy(void)
 	errno = 0; expect_errno("seccomp: adjtimex denied", syscall(SYS_adjtimex, NULL), EPERM);
 	errno = 0; expect_errno("seccomp: pidfd_getfd denied", syscall(SYS_pidfd_getfd, 0, 0, 0), EPERM);
 	errno = 0; expect_errno("inherited fd 3 closed", fcntl(3, F_GETFD), EBADF);
+
+	// /dev: only the listed nodes. Without Landlock /dev/kmsg (0644) would fail with EPERM from
+	// dmesg_restrict at the driver; EACCES means Landlock refused it at open.
+	errno = 0; expect_errno("landlock: open /dev/kmsg", open("/dev/kmsg", O_RDONLY), EACCES);
+	fd = open("/dev/null", O_WRONLY | O_TRUNC);
+	result(fd >= 0, "control: > /dev/null (O_TRUNC)", fd >= 0 ? "ok" : strerror(errno));
+	if (fd >= 0)
+		close(fd);
+	fd = open("/dev/urandom", O_RDONLY);
+	result(fd >= 0, "control: read /dev/urandom", fd >= 0 ? "ok" : strerror(errno));
+	if (fd >= 0)
+		close(fd);
+
+	// No capability in any set, bounding and ambient included.
+	FILE *f = fopen("/proc/self/status", "r");
+	char line[128];
+	int seen = 0, zero = 0;
+	while (f && fgets(line, sizeof line, f)) {
+		unsigned long long v;
+		char name[16];
+		if (sscanf(line, "Cap%15[^:]:%llx", name, &v) == 2) {
+			seen++;
+			zero += v == 0;
+			if (v) {
+				snprintf(d, sizeof d, "Cap%s = %llx", name, v);
+				result(0, "no capabilities", d);
+			}
+		}
+	}
+	if (f)
+		fclose(f);
+	snprintf(d, sizeof d, "%d of %d sets empty (Inh Prm Eff Bnd Amb)", zero, seen);
+	result(seen == 5 && zero == 5, "no capabilities", d);
 }
 
 static int jailed_checks(void)

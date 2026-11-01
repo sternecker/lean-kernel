@@ -1,0 +1,37 @@
+# Build and verify the kernel on every push and pull request: the pinned tarball, the fragment
+# verification, the byte-identical config check, the hardening checker with its accepted list, and the
+# syscall listing. It doesn't boot anything (make test needs KVM and Firecracker).
+#
+# It publishes nothing on purpose: a CI-built kernel's RANDSTRUCT layout is public the moment the
+# binary is (NOTES section 5). The build only proves the tree builds and verifies.
+name: build
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  kernel:
+    runs-on: ubuntu-latest
+    # Same distribution and clang as the development host, so the config matches what make config
+    # verifies there (Kconfig options depend on the compiler version).
+    container: debian:trixie
+    timeout-minutes: 60
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update -q
+          apt-get install -y -q --no-install-recommends \
+            make gcc flex bison bc dwarves cpio curl ca-certificates xz-utils git python3 \
+            e2fsprogs libelf-dev libssl-dev clang-22 lld-22 llvm-22
+      - uses: actions/checkout@v4
+      - name: Fetch (pinned tarball)
+        run: make fetch
+      - name: Config (every fragment line verified)
+        run: make config
+      - name: Build (config must stay identical to the verified one)
+        run: make build
+      - name: Hardening checker (pinned, accepted list enforced)
+        run: make check
+      - name: Syscalls present and compiled out
+        run: make syscalls

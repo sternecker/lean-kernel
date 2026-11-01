@@ -7,7 +7,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 set -a; source "$ROOT/VERSION"; set +a
 
 WORK="$ROOT/work"
-OUT="$ROOT/out"
+# LEAN_OUT=<dir> builds somewhere other than out/ (e.g. a second profile: VSOCK_ONLY=1 LEAN_OUT=$PWD/out-vsock).
+OUT="${LEAN_OUT:-$ROOT/out}"
 BIN="$ROOT/bin"
 SRC="$WORK/linux-$KERNEL_VERSION"
 FC="$BIN/release-$FIRECRACKER_VERSION-x86_64/firecracker-$FIRECRACKER_VERSION-x86_64"

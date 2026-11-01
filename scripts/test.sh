@@ -16,6 +16,10 @@ PROBE="$OUT/probe" JAIL_EXEC="$OUT/jail-exec" "$ROOT/scripts/mkrootfs.sh" >/dev/
 cfg="$OUT/vm-test.json"
 sed -e "s|@KERNEL@|$OUT/bzImage|" -e "s|@ROOTFS@|$OUT/rootfs-test.ext4|" -e "s|@VSOCK@|$OUT/vsock-test.sock|" \
     "$ROOT/vm/vm.json.in" > "$cfg"
+# Tell the probe which profile it's testing (VSOCK_ONLY=1 builds have no TCP/IP at all).
+if grep -q "^# CONFIG_INET is not set" "$OUT/.config"; then
+  sed -i 's|"boot_args": "\([^"]*\)"|"boot_args": "\1 probe_profile=vsock"|' "$cfg"
+fi
 rm -f "$OUT/vsock-test.sock"
 note "booting probe guest"
 timeout 120 "$FC" --no-api --config-file "$cfg" </dev/null 2>&1 | tr -d '\r' > "$OUT/test.log" || true
@@ -26,4 +30,12 @@ grep -E '^PROBE: ' "$OUT/test.log" || true
 grep -q 'Kernel panic' "$OUT/test.log" && die "guest panicked; see $OUT/test.log"
 grep -q '^PROBE-EXIT=0$' "$OUT/test.log" || die "probe failed or did not finish; see $OUT/test.log"
 grep -q '^PROBE-JAILED-EXIT=0$' "$OUT/test.log" || die "jailed probe failed or did not finish; see $OUT/test.log"
+# Each pass must run at least this many checks: a section that silently stops running (a setup
+# step failing before its checks) shows up as a lower count, not as a pass. Raise these when adding checks.
+min_root=96 min_user=83 min_jailed=29
+grep -q "^# CONFIG_INET is not set" "$OUT/.config" && min_jailed=27
+for pass in root:$min_root user:$min_user jailed:$min_jailed; do
+  n="$(sed -n "s/^PROBE: ${pass%%:*} \([0-9]*\) passed.*/\1/p" "$OUT/test.log")"
+  [[ -n "$n" && "$n" -ge "${pass##*:}" ]] || die "probe ${pass%%:*} pass ran ${n:-0} checks, expected at least ${pass##*:}; see $OUT/test.log"
+done
 echo "test: ok"

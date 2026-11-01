@@ -3,13 +3,15 @@
 //
 // Usage: jail-exec [--rw PATH]... [--connect PORT]... [--bind PORT]... [--vsock] UID COMMAND [ARGS...]
 //   --rw PATH       Landlock: full access beneath PATH. Everything else is read and execute only,
-//                   except /dev (read, write, device ioctls: terminals, /dev/null).
+//                   except /dev, where only null, zero, full, random, urandom, tty, ptmx, /dev/pts and
+//                   the terminal on fds 0-2 can be opened (read, write, ioctl). Not kmsg, hwrng, disks.
 //   --connect PORT  Landlock: TCP connect to PORT allowed. No other TCP connects.
 //   --bind PORT     Landlock: TCP bind/listen on PORT allowed. No other TCP binds.
 //   --vsock         seccomp: allow AF_VSOCK sockets (the host bridge needs them, the agent doesn't).
 //
 // Steps, each failing closed (exit 127):
-//   1. drop to UID (1..65534), verify every id changed and root can't be regained
+//   1. empty the capability bounding set and ambient set, drop to UID (1..65534), clear every
+//      capability set, verify every id changed, no capability is left, and root can't be regained
 //   2. no_new_privs
 //   3. Landlock (ABI >= 6 required): the filesystem and TCP rules above, plus scoping, so the agent
 //      can't signal or reach abstract unix sockets of processes outside its own domain (init, socat)
@@ -33,6 +35,9 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <linux/capability.h>
 #include <linux/audit.h>
 #include <linux/filter.h>
 #include <linux/landlock.h>
@@ -168,10 +173,22 @@ static int install_filter(int vsock)
 // What --rw grants: everything except creating device nodes.
 #define FS_RW (FS_ALL & ~(LANDLOCK_ACCESS_FS_MAKE_CHAR | LANDLOCK_ACCESS_FS_MAKE_BLOCK))
 
-static int add_path(int ruleset, const char *path, __u64 access)
+#define FS_DEV (LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_WRITE_FILE | \
+		LANDLOCK_ACCESS_FS_TRUNCATE | LANDLOCK_ACCESS_FS_IOCTL_DEV)
+#define FS_FILE_BITS (LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_WRITE_FILE | \
+		LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_TRUNCATE | LANDLOCK_ACCESS_FS_IOCTL_DEV)
+
+// optional: a missing path is skipped instead of failing (device nodes vary). A rule on a
+// non-directory may only carry file rights, so those are masked for files.
+static int add_path_opt(int ruleset, const char *path, __u64 access, int optional)
 {
 	struct landlock_path_beneath_attr pb = { .allowed_access = access };
 	pb.parent_fd = open(path, O_PATH | O_CLOEXEC);
+	if (pb.parent_fd < 0 && optional && errno == ENOENT)
+		return 0;
+	struct stat st;
+	if (pb.parent_fd >= 0 && fstat(pb.parent_fd, &st) == 0 && !S_ISDIR(st.st_mode))
+		pb.allowed_access &= FS_FILE_BITS;
 	if (pb.parent_fd < 0) {
 		fprintf(stderr, "jail-exec: landlock: %s: %s\n", path, strerror(errno));
 		return -1;
@@ -183,10 +200,58 @@ static int add_path(int ruleset, const char *path, __u64 access)
 	return rc;
 }
 
+static int add_path(int ruleset, const char *path, __u64 access)
+{
+	return add_path_opt(ruleset, path, access, 0);
+}
+
+// Read and execute everywhere except /dev. Landlock rules only add access, so a rule on "/" would
+// cover every device node too: grant each top-level entry instead, and "/" itself only listing.
+static int add_root_except_dev(int ruleset)
+{
+	if (add_path(ruleset, "/", LANDLOCK_ACCESS_FS_READ_DIR))
+		return -1;
+	DIR *d = opendir("/");
+	if (!d) {
+		perror("jail-exec: landlock: opendir /");
+		return -1;
+	}
+	struct dirent *e;
+	int bad = 0;
+	char path[300];
+	while (!bad && (e = readdir(d))) {
+		if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..") || !strcmp(e->d_name, "dev"))
+			continue;
+		snprintf(path, sizeof path, "/%s", e->d_name);
+		bad = add_path_opt(ruleset, path, FS_READ | LANDLOCK_ACCESS_FS_EXECUTE, 1);
+	}
+	closedir(d);
+	return bad ? -1 : 0;
+}
+
+static int add_dev(int ruleset)
+{
+	static const char *const nodes[] = { "/dev/null", "/dev/zero", "/dev/full", "/dev/random",
+					     "/dev/urandom", "/dev/tty", "/dev/ptmx", "/dev/pts" };
+	int bad = 0;
+	for (size_t i = 0; !bad && i < sizeof nodes / sizeof *nodes; i++)
+		bad = add_path_opt(ruleset, nodes[i], FS_DEV | FS_READ, 1);
+	// The terminal the agent was started on (the serial console), so /dev/stderr and friends work.
+	for (int fd = 0; !bad && fd <= 2; fd++) {
+		char *t = isatty(fd) ? ttyname(fd) : NULL;
+		if (t)
+			bad = add_path_opt(ruleset, t, FS_DEV, 1);
+	}
+	return bad;
+}
+
 static int add_port(int ruleset, long port, __u64 access)
 {
 	struct landlock_net_port_attr np = { .allowed_access = access, .port = (__u64)port };
 	int rc = (int)syscall(SYS_landlock_add_rule, ruleset, LANDLOCK_RULE_NET_PORT, &np, 0);
+	// A kernel without TCP/IP (the VSOCK_ONLY=1 profile) has no ports to allow: nothing to do.
+	if (rc && errno == EAFNOSUPPORT)
+		return 0;
 	if (rc)
 		fprintf(stderr, "jail-exec: landlock: rule for port %ld: %s\n", port, strerror(errno));
 	return rc;
@@ -216,8 +281,7 @@ static int apply_landlock(const struct policy *p)
 		perror("jail-exec: landlock_create_ruleset");
 		return -1;
 	}
-	int bad = add_path(rs, "/", FS_READ | LANDLOCK_ACCESS_FS_EXECUTE) ||
-		  add_path(rs, "/dev", FS_READ | LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_IOCTL_DEV);
+	int bad = add_root_except_dev(rs) || add_dev(rs);
 	for (int i = 0; !bad && i < p->nrw; i++)
 		bad = add_path(rs, p->rw[i], FS_RW);
 	for (int i = 0; !bad && i < p->nconnect; i++)
@@ -288,6 +352,24 @@ int main(int argc, char **argv)
 	}
 	uid_t uid = (uid_t)v;
 	gid_t gid = (gid_t)v;
+	// Nothing the agent execs can ever gain a capability back: empty bounding and ambient sets.
+	int last_cap = 63;
+	FILE *lc = fopen("/proc/sys/kernel/cap_last_cap", "r");
+	if (lc) {
+		if (fscanf(lc, "%d", &last_cap) != 1)
+			last_cap = 63;
+		fclose(lc);
+	}
+	for (int c = 0; c <= last_cap; c++) {
+		if (prctl(PR_CAPBSET_DROP, c, 0, 0, 0) && errno != EINVAL) {
+			perror("jail-exec: drop capability bounding set");
+			return 127;
+		}
+	}
+	if (prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0)) {
+		perror("jail-exec: clear ambient capabilities");
+		return 127;
+	}
 	if (setgroups(0, NULL) || setresgid(gid, gid, gid) || setresuid(uid, uid, uid)) {
 		perror("jail-exec: drop privileges");
 		return 127;
@@ -303,6 +385,25 @@ int main(int argc, char **argv)
 	if (setresuid(0, 0, 0) == 0 || setresgid(0, 0, 0) == 0) {
 		fprintf(stderr, "jail-exec: could regain root after dropping privileges\n");
 		return 127;
+	}
+	// The uid change clears permitted and effective; clear inheritable too, then check all of it.
+	struct __user_cap_header_struct ch = { _LINUX_CAPABILITY_VERSION_3, 0 };
+	struct __user_cap_data_struct cd[2] = { { 0, 0, 0 }, { 0, 0, 0 } };
+	if (syscall(SYS_capset, &ch, cd) || syscall(SYS_capget, &ch, cd)) {
+		perror("jail-exec: clear capabilities");
+		return 127;
+	}
+	for (int k = 0; k < 2; k++) {
+		if (cd[k].effective || cd[k].permitted || cd[k].inheritable) {
+			fprintf(stderr, "jail-exec: capabilities left after the drop\n");
+			return 127;
+		}
+	}
+	for (int c = 0; c <= last_cap; c++) {
+		if (prctl(PR_CAPBSET_READ, c, 0, 0, 0) > 0) {
+			fprintf(stderr, "jail-exec: capability %d still in the bounding set\n", c);
+			return 127;
+		}
 	}
 	// 2.
 	if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) {

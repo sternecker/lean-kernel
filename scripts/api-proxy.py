@@ -171,6 +171,25 @@ class Usage:
         return self.inp, self.out
 
 TOKEN = ""
+# --upstream-addr: connect to these addresses instead of resolving UPSTREAM, still verifying TLS for
+# UPSTREAM. The jail wrapper resolves the name once and lets this proxy's uid reach only those
+# addresses on 443 (nftables), so the proxy needs no DNS and can't reach anything else.
+ADDRS = []
+
+
+class UpstreamConnection(http.client.HTTPSConnection):
+    def connect(self):
+        if not ADDRS:
+            return super().connect()
+        err = None
+        for ip in ADDRS:
+            try:
+                raw = socket.create_connection((ip, self.port), self.timeout)
+                self.sock = TLS.wrap_socket(raw, server_hostname=UPSTREAM)
+                return
+            except OSError as e:
+                err = e
+        raise err
 BUDGET = Budget(0, 0, 0, 0, "")
 TLS = ssl.create_default_context()
 LOG = sys.stderr
@@ -239,7 +258,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         headers["Accept-Encoding"] = "identity"
         headers["Content-Length"] = str(len(body))
 
-        up = http.client.HTTPSConnection(UPSTREAM, 443, context=TLS, timeout=600)
+        up = UpstreamConnection(UPSTREAM, 443, context=TLS, timeout=600)
         sent = 0
         status = "-"
         try:
@@ -298,7 +317,7 @@ class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
 
 
 def main():
-    global TOKEN, LOG, BUDGET
+    global TOKEN, LOG, BUDGET, ADDRS
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--listen", required=True, help="Unix socket path (<vsock uds_path>_<port>)")
     tok = ap.add_mutually_exclusive_group(required=True)
@@ -310,8 +329,11 @@ def main():
     ap.add_argument("--max-output-tokens", type=int, default=1_000_000)
     ap.add_argument("--rpm", type=int, default=60)
     ap.add_argument("--models", default="")
+    ap.add_argument("--upstream-addr", action="append", default=[],
+                    help=f"IP address for {UPSTREAM} (repeatable); default: resolve the name")
     a = ap.parse_args()
     BUDGET = Budget(a.max_requests, a.max_input_tokens, a.max_output_tokens, a.rpm, a.models)
+    ADDRS = a.upstream_addr
 
     if a.token_file:
         st = os.stat(a.token_file)
@@ -336,6 +358,8 @@ def main():
     os.umask(old)
     log(f"api-proxy: {a.listen} -> https://{UPSTREAM} (allow: "
         + ", ".join(f"{m} {p}" for m, p in sorted(ALLOW)) + ")")
+    if ADDRS:
+        log(f"upstream: {UPSTREAM} pinned to {', '.join(ADDRS)} (no DNS)")
     log(f"budget: requests {a.max_requests or 'unlimited'}, input tokens {a.max_input_tokens or 'unlimited'}, "
         f"output tokens {a.max_output_tokens or 'unlimited'}, {a.rpm or 'unlimited'}/min, models {a.models or 'any'}")
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))  # run-agent.sh stops the proxy with TERM

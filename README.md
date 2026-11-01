@@ -52,13 +52,14 @@ make test      # boots the probe guest headless; fails if any cut or hardening c
 make run       # boots in Firecracker; ctrl-a x does nothing here, use `reboot -f` (exits Firecracker; `poweroff -f` only halts)
 make agent-rootfs  # read-only image with Claude Code, bash, socat, jail-exec (root-owned, via fakeroot)
 make agent     # Claude Code in the VM; credential stays in a host proxy (HOWTO §9.5)
+make agent-test   # the agent VM's hardening, checked from inside it (no Claude Code, no tokens)
 ```
 
 `make config` is the step that matters. `merge_config.sh` silently lets Kconfig dependencies override a fragment line; `configure.sh` re-reads the fragment afterwards and refuses to continue if any `=y` didn't take or any `is not set` came back as built-in. A cut that didn't happen is a false sense of security.
 
 ## What gets cut (see `configs/lean.fragment` for the full list)
 
-Modules (none; everything built in, no LKM rootkits), io_uring, user namespaces, BPF syscall, netfilter, kexec, /dev/mem, debugfs, 32-bit syscall table, legacy vsyscall, ptys, FUSE/NFS/CIFS/9p, USB, sound, graphics, wireless, kprobes/ftrace/perf, staging drivers. With `VSOCK_ONLY=1`, also TCP/IP, the virtio NIC driver and packet sockets: the guest's only channel out is vsock. Kept: virtio block/net/console/vsock/rng (net only in the default profile), ext4, serial console, seccomp, Landlock, Yama, lockdown.
+Modules (none; everything built in, no LKM rootkits), io_uring, user namespaces, BPF syscall, netfilter, kexec, /dev/mem, debugfs, 32-bit syscall table, legacy vsyscall, legacy (BSD) ptys, cross-process memory access, fanotify, file handles, FUSE/NFS/CIFS/9p, USB, sound, graphics, wireless, kprobes/ftrace, staging drivers. `perf_event_open` can't be cut on x86 (it's forced on), and Unix98 ptys stay; `jail-exec` refuses `perf_event_open` for the agent. With `VSOCK_ONLY=1`, also TCP/IP, the virtio NIC driver and packet sockets: the guest's only channel out is vsock. Kept: virtio block/net/console/vsock (net only in the default profile; the virtio-rng driver is built in but no entropy device is configured), ext4, serial console, seccomp, Landlock, Yama, lockdown.
 
 ## Threat model, stated plainly
 

@@ -1,0 +1,32 @@
+# kernel-hardening-checker FAILs reviewed and accepted for this guest. make check fails on any
+# other FAIL. Format: OPTION BUILD REASON, where BUILD is all, clang (LLVM=1) or gcc (LLVM=0).
+# Remove a line when the checker stops failing it (make check says so). HOWTO "Accepted checker
+# failures" has the longer reasoning.
+
+# Not applicable to a no-PCI virtio-mmio guest.
+CONFIG_X86_MCE                    all    Firecracker doesn't forward machine checks; the host handles hardware errors
+CONFIG_X86_MCE_INTEL              all    as X86_MCE
+CONFIG_X86_MCE_AMD                all    as X86_MCE
+CONFIG_INTEL_IOMMU                all    no IOMMU is exposed to the guest
+CONFIG_AMD_IOMMU                  all    no IOMMU is exposed to the guest
+CONFIG_INTEL_IOMMU_DEFAULT_ON     all    no IOMMU is exposed to the guest
+CONFIG_INTEL_IOMMU_SVM            all    no IOMMU is exposed to the guest
+CONFIG_HW_RANDOM_TPM              all    no TPM; boot entropy comes from random.trust_cpu=on (RDRAND)
+CONFIG_WERROR                     all    build-time only; buys nothing at runtime and can break a build on a newer compiler
+
+# The chosen LSM stack (landlock, lockdown, yama).
+CONFIG_SECURITY_SELINUX           all    SELinux cut on purpose (NOTES section 3)
+CONFIG_LSM                        all    the checker wants selinux in the list; the stack is landlock,lockdown,yama
+CONFIG_LSM_MMAP_MIN_ADDR          all    exists only with SELinux; DEFAULT_MMAP_MIN_ADDR=65536 sets the same floor
+
+# Checker naming lag: 6.18 renamed CFI_CLANG to CFI. make config verifies CFI=y and CFI_PERMISSIVE off.
+CONFIG_CFI_CLANG                  all    renamed to CONFIG_CFI in 6.18 (checked by make config on clang builds)
+CONFIG_CFI_PERMISSIVE             all    reported against the old CFI_CLANG name; off on clang builds
+
+# Compiler-specific.
+CONFIG_GCC_PLUGIN_LATENT_ENTROPY  all    gcc plugins only, no clang equivalent; not built with gcc either (no plugin headers)
+CONFIG_RANDSTRUCT_FULL            gcc    needs clang (or gcc plugin headers); on in the default clang build
+CONFIG_KSTACK_ERASE               gcc    needs clang's stack-depth callback (or gcc plugins); on in the clang build
+CONFIG_KSTACK_ERASE_METRICS       gcc    reported with KSTACK_ERASE
+CONFIG_KSTACK_ERASE_RUNTIME_DISABLE gcc  reported with KSTACK_ERASE
+CONFIG_CFI_AUTO_DEFAULT           gcc    CFI needs clang

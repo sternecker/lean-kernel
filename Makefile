@@ -1,7 +1,7 @@
 # lean-kernel: minimal hardened Firecracker guest kernel.
 # Every target is a thin wrapper over scripts/; run the script directly for options.
 
-.PHONY: deps fetch config build check syscalls rootfs run test agent-rootfs agent clean distclean
+.PHONY: deps fetch config build check syscalls rootfs run test agent-rootfs agent agent-test clean distclean
 
 deps:
 	@scripts/deps-check.sh
@@ -36,6 +36,10 @@ agent-rootfs:
 # Claude Code in a VM; see scripts/run-agent.sh (TASK='...' for headless).
 agent:
 	@scripts/run-agent.sh
+
+# The agent VM's hardening, from inside the real agent image; no Claude Code, no tokens.
+agent-test:
+	@AGENT_SELFTEST=1 scripts/run-agent.sh
 
 clean:
 	rm -rf out

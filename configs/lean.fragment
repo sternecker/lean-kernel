@@ -82,7 +82,7 @@
 # CONFIG_X86_X32_ABI is not set
 CONFIG_LEGACY_VSYSCALL_NONE=y
 # CONFIG_COMPAT_VDSO is not set
-# CONFIG_USELIB is not set
+# (CONFIG_USELIB is gone in 6.18: the uselib syscall was removed, so there is nothing to cut.)
 # CONFIG_SYSFS_SYSCALL is not set
 # CONFIG_LEGACY_PTYS is not set
 # CONFIG_BINFMT_MISC is not set
@@ -236,3 +236,9 @@ CONFIG_SECURITY_DMESG_RESTRICT=y
 CONFIG_LSM="landlock,lockdown,yama"
 CONFIG_STATIC_USERMODEHELPER=y
 CONFIG_STATIC_USERMODEHELPER_PATH=""
+
+# Cross-process and file-handle interfaces the agent never needs (jail-exec also refuses them):
+# process_vm_readv/writev, fanotify, name_to_handle_at/open_by_handle_at.
+# CONFIG_CROSS_MEMORY_ATTACH is not set
+# CONFIG_FANOTIFY is not set
+# CONFIG_FHANDLE is not set

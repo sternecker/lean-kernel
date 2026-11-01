@@ -2,8 +2,20 @@
 KERNEL_SERIES=6.18
 KERNEL_VERSION=6.18.58
 KERNEL_URL=https://cdn.kernel.org/pub/linux/kernel/v6.x
+# sha256 of linux-$KERNEL_VERSION.tar.xz. On a bump: scripts/fetch-kernel.sh --pin prints it (checked against
+# kernel.org's signed sha256sums.asc when gpg has the autosigner key).
+KERNEL_SHA256=069b19f9032c4dac8149ae4b6520c35debca0f42a9f6d52ee55ba6ca9b818013
 FIRECRACKER_VERSION=v1.17.0
 FIRECRACKER_SHA256=06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558
+# Claude Code in the agent image, pinned: jail-exec's syscall allowlist was traced against this version.
+# Bump: install the new version on the host, scripts/mkrootfs-agent.sh --pin <version> prints both lines,
+# then redo the trace (HOWTO 6c) before trusting the allowlist with it.
+CLAUDE_CODE_VERSION=2.1.316
+CLAUDE_CODE_SHA256=fd13c70000fec3f2116dfbcbb6121210b4a29328bf0e46210a59dd594a67d824
+# kernel-hardening-checker, pinned: make check runs it, so it's code from the network running as you.
+# Bump deliberately: review the diff, set the new commit, rerun make check.
+KHC_URL=https://github.com/a13xp0p0v/kernel-hardening-checker
+KHC_COMMIT=b2acfd4f8fba4e91996224b29c992cf83be30904
 BASE_CONFIG=configs/base-firecracker-x86_64-6.18.config
 BASE_CONFIG_SRC=https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/resources/guest_configs/microvm-kernel-ci-x86_64-6.18.config
 BASE_CONFIG_FETCHED=2026-10-23

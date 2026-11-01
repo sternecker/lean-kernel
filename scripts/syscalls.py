@@ -44,7 +44,10 @@ present, absent = [], []
 for nr in sorted(names):
     ptr, = struct.unpack_from('<Q', data, base + 8 * nr)
     target = addr_name.get(ptr, hex(ptr))
-    stub = 'ni_syscall' in target or sym_type.get('__cfi_' + target) == 'W'
+    # A compiled-out syscall points at a COND_SYSCALL stub: a weak symbol (W) with gcc. With CFI
+    # (clang), the stub itself is a local text symbol and only its __cfi_ preamble is weak.
+    stub = ('ni_syscall' in target or sym_type.get(target) in ('W', 'w')
+            or sym_type.get('__cfi_' + target) == 'W')
     (absent if stub else present).append((nr, names[nr]))
 
 with open(out_txt, 'w') as f:

@@ -17,6 +17,10 @@ note "merging $(basename "$BASE_CONFIG") + ${frags[*]##*/}"
 ( cd "$SRC" && make -s "${MAKE_TOOLCHAIN[@]}" O="$OUT" olddefconfig )
 
 # Verification: re-read each fragment line against the final .config.
+# Every symbol this kernel's Kconfig defines: an is-not-set line naming anything else is a typo or a
+# rename, so the cut it means to make silently doesn't happen. That fails, it doesn't warn.
+declare -A ksym=()
+while read -r sym; do ksym[$sym]=1; done < <(grep -rhoE '^[[:space:]]*(menu)?config[[:space:]]+[A-Z0-9_]+' --include='Kconfig*' "$SRC" | awk '{print $2}' | sort -u)
 fail=0; warn=0
 declare -A wanted=(); order=()
 for f in "${frags[@]}"; do
@@ -39,7 +43,11 @@ check_opt() {
     if [[ "$got" == "y" || "$got" == "m" ]]; then
       echo "FAIL  $opt wanted off, final config has =$got"; fail=$((fail+1))
     elif [[ -z "$got" ]] && ! grep -q "^# $opt is not set" "$OUT/.config"; then
-      echo "warn  $opt not present in final config (renamed/removed, or a dependency is off: harmless for an is-not-set line)"; warn=$((warn+1))
+      if [[ -v "ksym[${opt#CONFIG_}]" ]]; then
+        echo "warn  $opt not in final config: a dependency is off, so it can't be on (harmless for an is-not-set line)"; warn=$((warn+1))
+      else
+        echo "FAIL  $opt is not a Kconfig symbol in $KERNEL_VERSION (renamed or removed): find what replaced it and update the fragment"; fail=$((fail+1))
+      fi
     fi
   else
     if [[ "$got" != "$want" ]]; then
@@ -54,7 +62,7 @@ base_total=$(grep -cE "^CONFIG_[A-Z0-9_]+=(y|m)" "$ROOT/$BASE_CONFIG")
 echo "enabled options: base $base_total -> lean $total"
 echo "verification: $fail failed, $warn warnings"
 if [[ $fail -gt 0 && "${ALLOW_DRIFT:-0}" != "1" ]]; then
-  die "fragment lines were overridden by Kconfig dependencies. Fix the fragment (add the dependency, or drop the line and record why). ALLOW_DRIFT=1 to continue anyway."
+  die "fragment lines did not take effect (FAIL lines above): a Kconfig dependency overrode them, or the symbol doesn't exist. Fix the fragment (add the dependency, rename, or drop the line and record why). ALLOW_DRIFT=1 to continue anyway."
 fi
 profile="lean"; [[ "$VSOCK_ONLY" == "1" ]] && profile="lean-vsock"
 cp "$OUT/.config" "$OUT/$profile-$KERNEL_VERSION.config"

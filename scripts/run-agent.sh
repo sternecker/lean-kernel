@@ -9,6 +9,7 @@
 #   AGENT_MAX_REQUESTS=500 AGENT_MAX_INPUT_TOKENS=50000000 AGENT_MAX_OUTPUT_TOKENS=1000000 AGENT_RPM=60
 #                                      per-session proxy budget (0 = unlimited); AGENT_MODELS='claude-sonnet-*,...'
 #                                      limits models. Usage and totals: out/agent-proxy.log
+#   AGENT_SELFTEST=1 (make agent-test)  boot the agent image, check its hardening, no Claude Code, no tokens
 #   AGENT_STRACE=1                     trace agent + bridge syscalls (image built with STRACE=1 make agent-rootfs)
 #   AGENT_EXEC=1                       allow exec on /tmp and /home/agent (default noexec)
 #   KEEP_SCRATCH=1                     reuse out/scratch-agent.ext4 instead of starting from an empty home
@@ -47,6 +48,7 @@ if [[ "${KEEP_SCRATCH:-0}" != "1" || ! -f "$scratch" ]]; then
 fi
 
 mode=interactive; [[ -n "${TASK:-}" ]] && mode=headless
+[[ "${AGENT_SELFTEST:-0}" == "1" ]] && mode=selftest
 rows=40 cols=120
 if [[ -t 0 ]]; then read -r rows cols < <(stty size) || true; fi
 vsock="$OUT/vsock-agent.sock"
@@ -98,8 +100,9 @@ else
   where="unjailed: Firecracker and the proxy run as $(id -un) (sudo scripts/jail-setup.sh to jail them)"
 fi
 
-if [[ "$mode" == headless ]]; then
-  note "headless agent VM ($where); task: $TASK"
+if [[ "$mode" == headless || "$mode" == selftest ]]; then
+  if [[ "$mode" == selftest ]]; then note "agent VM self-test ($where): hardening checks, no tokens spent"
+  else note "headless agent VM ($where); task: $TASK"; fi
   timeout "${TIMEOUT:-600}" "${launch[@]}" </dev/null 2>&1 | tr -d '\r' > "$OUT/agent.log" || true
   sed -n '/^AGENT-START$/,/^AGENT-EXIT=/p' "$OUT/agent.log" | sed '1d'
   for f in agent socat; do  # AGENT_STRACE=1: syscall summaries, traced from outside the jail
@@ -111,6 +114,11 @@ if [[ "$mode" == headless ]]; then
   if [[ -n "$denials" ]]; then echo "--- refused by jail-exec (seccomp type=1326, Landlock type=1423) ---"; echo "$denials"; fi
   echo "--- proxy log ---"; tail -n 20 "$OUT/agent-proxy.log"
   grep -q 'Kernel panic' "$OUT/agent.log" && die "guest panicked; see $OUT/agent.log"
+  if [[ "$mode" == selftest ]]; then
+    grep -q '^AGENT-EXIT=0$' "$OUT/agent.log" || die "agent self-test failed (SELFTEST FAIL lines above); see $OUT/agent.log"
+    echo "agent-test: ok ($(grep -c '^SELFTEST PASS' "$OUT/agent.log") checks)"
+    exit 0
+  fi
   grep -q '^AGENT-EXIT=0$' "$OUT/agent.log" || die "agent failed or did not finish; see $OUT/agent.log"
   echo "agent: ok"
 else

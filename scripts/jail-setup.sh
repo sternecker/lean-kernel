@@ -15,6 +15,8 @@
 #              /etc/sudoers.d/lean-agent                       lets OWNER run exactly
 #                                                              /usr/local/sbin/lean-agent-jail without a password
 #              /srv/lean-agent                                 per-run chroots (created and removed per run)
+#   firewall   nftables table inet lean_agent, created by the first run: uid lean-proxy may open TCP 443
+#              to api.anthropic.com's addresses and nothing else
 set -euo pipefail
 [[ $EUID -eq 0 ]] || { echo "run with sudo: sudo $0 ${*:-}" >&2; exit 1; }
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -30,6 +32,7 @@ if [[ "${1:-install}" == uninstall ]]; then
   rm -f "$LIB/jailer" "$LIB/firecracker"; rmdir "$LIB" 2>/dev/null || true
   rmdir /srv/lean-agent/firecracker /srv/lean-agent 2>/dev/null || true
   rmdir /sys/fs/cgroup/lean-agent 2>/dev/null || true
+  command -v nft >/dev/null && nft delete table inet lean_agent 2>/dev/null || true
   for u in lean-fc lean-proxy; do getent passwd "$u" >/dev/null && userdel "$u"; done
   echo "uninstalled"
   exit 0
@@ -43,6 +46,7 @@ tgz=""
 for t in "$ROOT/bin/firecracker-$FIRECRACKER_VERSION-x86_64.tgz" "$ROOT/bin/fc.tgz"; do
   [[ -f "$t" ]] && echo "$FIRECRACKER_SHA256  $t" | sha256sum -c --quiet - 2>/dev/null && { tgz="$t"; break; }
 done
+command -v nft >/dev/null || { echo "nft is needed for the proxy's egress rule: apt install nftables" >&2; exit 1; }
 [[ -n "$tgz" ]] || { echo "no Firecracker $FIRECRACKER_VERSION tarball in bin/ matching FIRECRACKER_SHA256; run make deps" >&2; exit 1; }
 echo "firecracker tarball: $tgz (sha256 ok)"
 
