@@ -5,8 +5,9 @@
 #   sudo scripts/jail-setup.sh uninstall  remove everything it installed
 #
 # What it changes on the host:
-#   users      lean-fc (runs Firecracker), lean-proxy (runs the API proxy): system users, no home,
-#              no shell, no password
+#   users      lean-proxy (runs the API proxy): system user, no home, no shell, no password.
+#              Firecracker runs as a uid of its own per run (FC_UID_BASE.. in the conf, no passwd entry),
+#              claimed under /run/lean-agent/uids. An older install's lean-fc user is removed.
 #   files      /usr/local/lib/lean-agent/{jailer,firecracker}  root-owned copies from the release
 #                tarball, re-verified against FIRECRACKER_SHA256 in VERSION. Root must never run the
 #                copies in bin/, which the repo owner can write.
@@ -32,6 +33,7 @@ if [[ "${1:-install}" == uninstall ]]; then
   rm -f "$LIB/jailer" "$LIB/firecracker"; rmdir "$LIB" 2>/dev/null || true
   rmdir /srv/lean-agent/firecracker /srv/lean-agent 2>/dev/null || true
   rmdir /sys/fs/cgroup/lean-agent 2>/dev/null || true
+  rm -f /run/lean-agent/uids/.lock; rmdir /run/lean-agent/uids /run/lean-agent 2>/dev/null || true
   command -v nft >/dev/null && nft delete table inet lean_agent 2>/dev/null || true
   for u in lean-fc lean-proxy; do getent passwd "$u" >/dev/null && userdel "$u"; done
   echo "uninstalled"
@@ -50,10 +52,10 @@ command -v nft >/dev/null || { echo "nft is needed for the proxy's egress rule: 
 [[ -n "$tgz" ]] || { echo "no Firecracker $FIRECRACKER_VERSION tarball in bin/ matching FIRECRACKER_SHA256; run make deps" >&2; exit 1; }
 echo "firecracker tarball: $tgz (sha256 ok)"
 
-for u in lean-fc lean-proxy; do
-  getent passwd "$u" >/dev/null || useradd --system --user-group --no-create-home \
-    --home-dir /nonexistent --shell /usr/sbin/nologin --comment "lean-kernel agent jail" "$u"
-done
+# lean-fc ran Firecracker before it got a uid per run; nothing uses it now.
+if getent passwd lean-fc >/dev/null; then userdel lean-fc; fi
+getent passwd lean-proxy >/dev/null || useradd --system --user-group --no-create-home \
+  --home-dir /nonexistent --shell /usr/sbin/nologin --comment "lean-kernel agent jail" lean-proxy
 
 tmp="$(mktemp -d)"; trap 'rm -rf -- "$tmp"' EXIT
 tar xzf "$tgz" -C "$tmp"
@@ -72,6 +74,10 @@ OUT=$(printf %q "$ROOT/out")
 TOKEN_FILE=$(printf %q "$home/.config/lean-kernel/oauth-token")
 # Per-VM cgroup v2 limits. The guest has 2 GiB and 2 vCPUs; this caps the whole Firecracker process.
 CGROUPS=1
+# Firecracker gets one uid per run from FC_UID_BASE .. FC_UID_BASE+FC_UID_COUNT-1 (no passwd entries).
+# Keep the range clear of real users and of /etc/subuid ranges; the wrapper skips any uid in use anyway.
+FC_UID_BASE=2000000000
+FC_UID_COUNT=64
 MEM_MAX=$((2560 * 1024 * 1024))
 PIDS_MAX=64
 CPU_MAX="200000 100000"

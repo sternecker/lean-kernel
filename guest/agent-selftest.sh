@@ -78,4 +78,14 @@ s="$(http_status POST /v1/messages "{$msg,\"mcp_servers\":[{\"type\":\"url\",\"u
 check "proxy refuses mcp_servers" "$([ "$s" = 403 ] && echo 1 || echo 0)" "-> $s"
 s="$(http_status POST /v1/messages 'not json')"
 check "proxy refuses a non-JSON body" "$([ "$s" = 403 ] && echo 1 || echo 0)" "-> $s"
+# Content the API would fetch server-side: a URL in a source, anywhere in the body, is a way out.
+s="$(http_status POST /v1/messages '{"model":"claude-haiku-4-5","max_tokens":1,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"url","url":"https://example.invalid/x.png"}}]}]}')"
+check "proxy refuses a URL image source" "$([ "$s" = 403 ] && echo 1 || echo 0)" "-> $s"
+s="$(http_status POST /v1/messages '{"model":"claude-haiku-4-5","max_tokens":1,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":[{"type":"document","source":{"type":"url","url":"https://example.invalid/x.pdf"}}]}]}]}')"
+check "proxy refuses a URL document inside a tool result" "$([ "$s" = 403 ] && echo 1 || echo 0)" "-> $s"
+s="$(http_status POST /v1/messages "{$msg,\"some_future_field\":1}")"
+check "proxy refuses an unknown top-level field" "$([ "$s" = 403 ] && echo 1 || echo 0)" "-> $s"
+# A malformed Content-Length is refused cleanly (once it raised, and the traceback skipped the log cap).
+s="$( { exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'POST /v1/messages HTTP/1.1\r\nHost: proxy\r\nContent-Length: abc\r\nConnection: close\r\n\r\n' >&3 && read -r l <&3 && set -- $l && echo "${2:-none}"; } 2>/dev/null )"
+check "proxy refuses a malformed Content-Length" "$([ "$s" = 400 ] && echo 1 || echo 0)" "-> ${s:-none}"
 exit "$fails"

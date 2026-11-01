@@ -222,6 +222,7 @@ of those calls. To redo it after a Claude Code update, or for a different agent:
 STRACE=1 make agent-rootfs && AGENT_STRACE=1 TASK='...' make agent   # out/strace-agent.txt, out/strace-socat.txt
 make agent-rootfs                                                    # rebuild without strace afterwards
 ```
+(Without the jail installed yet, add `JAIL=0`; see 9.5.)
 
 `make agent` prints what the jail refused after each headless run. Expect one `syscall=435` (`clone3`, by design)
 and one `syscall=41` (a `socket()` call from Claude Code, almost certainly netlink, which it doesn't need).
@@ -291,6 +292,9 @@ In order, one at a time:
 
 ### 9.5 Claude Code in the VM (first test, before the jailer)
 
+`make agent` and `make agent-test` require the jail (9.2) by default. Before it's set up, prefix them with `JAIL=0`
+to run Firecracker and the proxy as you.
+
 ```sh
 claude setup-token                       # on the host; prints a long-lived subscription token
 mkdir -p ~/.config/lean-kernel && (umask 077; cat > ~/.config/lean-kernel/oauth-token)   # paste it, then ctrl-d
@@ -304,7 +308,12 @@ port 8080 -> `out/vsock-agent.sock_8080` -> `scripts/api-proxy.py` on the host -
 The guest holds only a placeholder token. The proxy swaps in the real one, forwards only `POST /v1/messages`
 and `/v1/messages/count_tokens`, and logs one line per request to `out/agent-proxy.log`. It also rejects any
 request that asks Anthropic's servers to reach out for the agent: server tools (`web_fetch`, `web_search`, code
-execution) and `mcp_servers`. Otherwise a URL with data in its query string would be a way out. Claude Code's WebSearch
+execution), `mcp_servers`, and content blocks whose `source` is a URL or an uploaded file (an image or PDF "by URL"
+is fetched server-side), anywhere in the messages, tool results included. Otherwise a URL with data in its query
+string would be a way out. The checks are allowlists: top-level fields (`ALLOW_FIELDS`) and source types
+(`ALLOW_SOURCES`: base64, text, content). A field the API adds later is refused, with its name in the DENY line,
+until it's read and added. Log lines escape control characters, and what `make agent` prints from the guest and
+the log has them stripped, so the guest can't send escape sequences to your terminal. Claude Code's WebSearch
 tool is therefore unavailable in the VM.
 Each session (one proxy process) also has a budget: 500 requests, 50M input tokens (cache reads included), 1M output
 tokens and 60 requests a minute, with an optional model allowlist. Change them with `AGENT_MAX_REQUESTS`,
@@ -329,7 +338,8 @@ sends is forwarded upstream, so it spends no tokens.
   - `/dev/kmsg` refused;
   - no exec of a binary it wrote;
   - no TCP connect except to port 8080;
-  - the proxy refusing an off-allowlist path, `web_fetch`, `mcp_servers` and a non-JSON body.
+  - the proxy refusing an off-allowlist path, `web_fetch`, `mcp_servers`, a non-JSON body, URL image and document
+    sources (one inside a tool result), an unknown top-level field and a malformed `Content-Length`.
 
 Run it after changing the image, `jail-exec`, the proxy or the wrapper.
 
@@ -339,10 +349,13 @@ host version is noted and ignored. To bump:
 1. Install the new version on the host.
 2. Run `scripts/mkrootfs-agent.sh --pin <version>` and copy the two lines it prints into `VERSION`.
 3. Redo the syscall trace (6c), because the allowlist was traced against the old version.
+4. Recheck the proxy's `ALLOW_FIELDS` (`scripts/api-proxy.py`): a new top-level field shows up as `API Error: 403
+   field 'X' not allowed` in Claude Code and a DENY line in `out/agent-proxy.log`. Find what X does before adding it.
 
-**Jailed (9.2).** Run `sudo scripts/jail-setup.sh` once, and `make agent` uses the jail from then on. `JAIL=0`
-runs unjailed and `JAIL=1` refuses to run without the jail. What the setup installs:
-- The users `lean-fc` and `lean-proxy`.
+**Jailed (9.2).** Run `sudo scripts/jail-setup.sh` once, and `make agent` uses the jail from then on. The jail is
+the default: without it, `make agent` refuses to run. `JAIL=0` runs unjailed (Firecracker and the proxy as you), and
+`JAIL=auto` uses the jail if it's installed and otherwise runs unjailed with a warning. What the setup installs:
+- The user `lean-proxy` (and removes `lean-fc` from an older install: Firecracker no longer has a user of its own).
 - Root-owned copies of the jailer and Firecracker from the pinned release tarball, in `/usr/local/lib/lean-agent`.
   Root never runs the ones in `bin/`, because you can write to that directory.
 - The wrapper, `/usr/local/sbin/lean-agent-jail`.
@@ -350,7 +363,11 @@ runs unjailed and `JAIL=1` refuses to run without the jail. What the setup insta
 - A sudoers rule that lets you run only that wrapper without a password.
 
 Each run gets a fresh chroot under `/srv/lean-agent/firecracker/<id>/root`:
-- **Firecracker** runs as `lean-fc` in an empty network namespace, so it has no route anywhere. A cgroup caps it
+- **Firecracker** runs as a uid of its own for this run (from `FC_UID_BASE` in `/etc/lean-agent.conf`, default
+  2000000000, 64 of them; no passwd entry), so two VMs running at once can't reach each other's chroot. The wrapper
+  claims it under `/run/lean-agent/uids` and skips any uid with a passwd or group entry, a subuid/subgid range, a
+  process, or files left by a crashed run. The chroot stays root-owned while root fills it and goes to that uid
+  only just before Firecracker starts. It runs in an empty network namespace, so it has no route anywhere. A cgroup caps it
   at 2.5 GiB of memory, 64 pids and 2 CPUs, and the jailer applies an fd limit and Firecracker's own seccomp filter.
 - **The proxy** runs as `lean-proxy`, with no groups, no capabilities and `no_new_privs`. The wrapper pipes the
   token to it, so `lean-proxy` never needs access to your home directory, which is mode 710 anyway.

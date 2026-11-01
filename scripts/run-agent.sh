@@ -13,20 +13,24 @@
 #   AGENT_STRACE=1                     trace agent + bridge syscalls (image built with STRACE=1 make agent-rootfs)
 #   AGENT_EXEC=1                       allow exec on /tmp and /home/agent (default noexec)
 #   KEEP_SCRATCH=1                     reuse out/scratch-agent.ext4 instead of starting from an empty home
-#   JAIL=auto|1|0                      auto (default): use the jailer if scripts/jail-setup.sh installed it.
-#                                      1: require it. 0: run Firecracker and the proxy as you, unjailed.
+#   JAIL=1|0|auto                      1 (default): require the jailer (sudo scripts/jail-setup.sh once).
+#                                      0: run Firecracker and the proxy as you, unjailed (explicit opt-out).
+#                                      auto: jailer if installed, else unjailed, with a warning.
 #
 # The token stays in the proxy process. The guest gets a placeholder; Firecracker runs without it in its env.
-# Jailed (sudo scripts/jail-setup.sh once): Firecracker runs as lean-fc in a chroot, an empty network
+# Jailed (sudo scripts/jail-setup.sh once): Firecracker runs as a uid of its own per run in a chroot, an empty network
 # namespace and its own cgroup; the proxy as lean-proxy. TOKEN_FILE then comes from /etc/lean-agent.conf.
 source "$(dirname "$0")/_env.sh"
 
 AGENT_UID="${AGENT_UID:-10000}"
 TOKEN_FILE="${TOKEN_FILE:-$HOME/.config/lean-kernel/oauth-token}"
 WRAPPER=/usr/local/sbin/lean-agent-jail
-case "${JAIL:-auto}" in
-  auto) jailed=0; [[ -x "$WRAPPER" ]] && jailed=1 ;;
-  1)    [[ -x "$WRAPPER" ]] || die "JAIL=1 but $WRAPPER is not installed; run: sudo scripts/jail-setup.sh"; jailed=1 ;;
+# Fails closed: a missing wrapper stops the run instead of quietly running Firecracker and the proxy
+# as you, with your files and your network.
+case "${JAIL:-1}" in
+  auto) jailed=0; [[ -x "$WRAPPER" ]] && jailed=1
+        [[ $jailed == 1 ]] || echo "warning: $WRAPPER not installed; running UNJAILED (JAIL=auto)" >&2 ;;
+  1)    [[ -x "$WRAPPER" ]] || die "$WRAPPER is not installed; run: sudo scripts/jail-setup.sh (or JAIL=0 to run unjailed, as you)"; jailed=1 ;;
   0)    jailed=0 ;;
   *)    die "JAIL must be auto, 1 or 0" ;;
 esac
@@ -46,6 +50,15 @@ if [[ "${KEEP_SCRATCH:-0}" != "1" || ! -f "$scratch" ]]; then
   rm -f "$scratch"
   fakeroot -- sh -c "chown -R $AGENT_UID:$AGENT_UID '$s' && chmod 700 '$s' && /sbin/mkfs.ext4 -q -L agent-home -E root_owner=${AGENT_UID}:${AGENT_UID} -d '$s' '$scratch' ${SCRATCH_MB:-512}M"
 fi
+
+# Guest output shown on this terminal: drop control characters (C0 except tab and newline, DEL, C1),
+# so nothing the guest prints can send escape sequences to the host's terminal emulator.
+sanitize() {
+  python3 -I -c 'import re, sys
+sys.stdout.write(re.sub(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]", "", sys.stdin.buffer.read().decode("utf-8", "replace")))'
+}
+# The guest's exit status: the last AGENT-EXIT line init printed (agent lines are prefixed "| ").
+agent_exit() { grep '^AGENT-EXIT=' "$OUT/agent.log" | tail -n 1; }
 
 mode=interactive; [[ -n "${TASK:-}" ]] && mode=headless
 [[ "${AGENT_SELFTEST:-0}" == "1" ]] && mode=selftest
@@ -88,7 +101,7 @@ c["vsock"]["uds_path"] = "v.sock"
 json.dump(c, open(sys.argv[2], "w"), indent=2)
 EOF
   launch=(sudo -n "$WRAPPER" "${budget[@]}")
-  where="jailed: Firecracker as lean-fc, proxy as lean-proxy"
+  where="jailed: Firecracker as a per-run uid, proxy as lean-proxy"
 else
   rm -f "$vsock" "${vsock}_8080"
   python3 "$ROOT/scripts/api-proxy.py" --listen "${vsock}_8080" --token-file "$TOKEN_FILE" \
@@ -104,22 +117,22 @@ if [[ "$mode" == headless || "$mode" == selftest ]]; then
   if [[ "$mode" == selftest ]]; then note "agent VM self-test ($where): hardening checks, no tokens spent"
   else note "headless agent VM ($where); task: $TASK"; fi
   timeout "${TIMEOUT:-600}" "${launch[@]}" </dev/null 2>&1 | tr -d '\r' > "$OUT/agent.log" || true
-  sed -n '/^AGENT-START$/,/^AGENT-EXIT=/p' "$OUT/agent.log" | sed '1d'
+  sed -n '/^AGENT-START$/,/^AGENT-EXIT=/p' "$OUT/agent.log" | sed '1d; s/^| //' | sanitize
   for f in agent socat; do  # AGENT_STRACE=1: syscall summaries, traced from outside the jail
     grep -q "^STRACE-BEGIN $f\$" "$OUT/agent.log" || continue
     sed -n "/^STRACE-BEGIN $f\$/,/^STRACE-END\$/p" "$OUT/agent.log" | sed '1d;$d' > "$OUT/strace-$f.txt"
     echo "syscall summary: $OUT/strace-$f.txt"
   done
   denials="$(sed -n '/^DENIALS-BEGIN$/,/^DENIALS-END$/p' "$OUT/agent.log" | sed '1d;$d')"
-  if [[ -n "$denials" ]]; then echo "--- refused by jail-exec (seccomp type=1326, Landlock type=1423) ---"; echo "$denials"; fi
-  echo "--- proxy log ---"; tail -n 20 "$OUT/agent-proxy.log"
+  if [[ -n "$denials" ]]; then echo "--- refused by jail-exec (seccomp type=1326, Landlock type=1423) ---"; echo "$denials" | sanitize; fi
+  echo "--- proxy log ---"; tail -n 20 "$OUT/agent-proxy.log" | sanitize
   grep -q 'Kernel panic' "$OUT/agent.log" && die "guest panicked; see $OUT/agent.log"
   if [[ "$mode" == selftest ]]; then
-    grep -q '^AGENT-EXIT=0$' "$OUT/agent.log" || die "agent self-test failed (SELFTEST FAIL lines above); see $OUT/agent.log"
+    [[ "$(agent_exit)" == AGENT-EXIT=0 ]] || die "agent self-test failed (SELFTEST FAIL lines above); see $OUT/agent.log"
     echo "agent-test: ok ($(grep -c '^SELFTEST PASS' "$OUT/agent.log") checks)"
     exit 0
   fi
-  grep -q '^AGENT-EXIT=0$' "$OUT/agent.log" || die "agent failed or did not finish; see $OUT/agent.log"
+  [[ "$(agent_exit)" == AGENT-EXIT=0 ]] || die "agent failed or did not finish; see $OUT/agent.log"
   echo "agent: ok"
 else
   note "interactive agent VM ($where); proxy log: $OUT/agent-proxy.log"

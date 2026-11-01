@@ -4,8 +4,9 @@
 Listens on a Unix socket: Firecracker turns a guest connection to vsock CID 2 port P into a
 connection to <uds_path>_P on the host. Takes plain HTTP from the guest, strips whatever credential
 the guest sent, adds the real one, and forwards to https://api.anthropic.com over verified TLS.
-Only allowlisted method+path pairs are forwarded, and only bodies without server-side tools or MCP
-servers (see body_policy); everything else gets a 403 and a DENY log line.
+Only allowlisted method+path pairs are forwarded, and only bodies that can't make Anthropic's servers
+fetch anything (see body_policy: allowlisted top-level fields, client tools only, inline content
+sources only); everything else gets a 403 and a DENY log line.
 Responses are relayed as they arrive (Claude streams server-sent events).
 
 The credential is read from a file at startup and exists only in this process:
@@ -50,31 +51,78 @@ HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", 
        "transfer-encoding", "upgrade", "host", "content-length"}
 DROP_IN = HOP | {"authorization", "x-api-key", "accept-encoding", "cookie"}
 MAX_BODY = 32 << 20
-# Request fields that make Anthropic's servers reach out on the agent's behalf: server tools (web
-# fetch/search, code execution, ...) and remote MCP servers. Any of them turns the API into a route
-# to arbitrary hosts, e.g. a URL with data in its query string. Client tools, which the agent runs
-# itself, have no "type" (or "custom"), so only those pass.
-DENY_FIELDS = ("mcp_servers", "container")
+# Anything that makes Anthropic's servers reach out on the agent's behalf turns the API into a route
+# to arbitrary hosts (a URL with data in its query string): server tools (web fetch/search, code
+# execution, ...), remote MCP servers, containers, and content blocks whose source is a URL or an
+# uploaded file. Everything here is an allowlist, so a field or source type added to the API later is
+# refused until someone reads what it does and adds it. A refusal names the field in the DENY line.
+#
+# Top-level request fields that are forwarded. Anything else (mcp_servers, container, ...) is a 403.
+# The second group is what the pinned Claude Code (VERSION: CLAUDE_CODE_VERSION) adds to its request
+# body, read from its request builder: safeguards = [{type, classifier_context}] for Anthropic's
+# safety classifiers; speed; thread; diagnostics = {previous_message_id}; cache_control. None of them
+# names something for the server to fetch. On a Claude Code bump, recheck them (HOWTO, "Bump").
+ALLOW_FIELDS = frozenset({
+    "model", "messages", "system", "max_tokens", "metadata", "stop_sequences", "stream",
+    "temperature", "top_k", "top_p", "tools", "tool_choice", "thinking", "service_tier",
+    "context_management", "output_format", "output_config",
+    "safeguards", "speed", "thread", "diagnostics", "cache_control",
+})
+# Content block "source" types that carry their data inline. Not "url" (the server fetches it) and not
+# "file" (a Files API upload, which this proxy never allows the agent to make or reference).
+ALLOW_SOURCES = frozenset({"base64", "text", "content"})
+MAX_DEPTH = 64
+
+
+def _walk(v, depth=0):
+    """Return a reason if any nested content block in v points the server at something to fetch."""
+    if depth > MAX_DEPTH:
+        return "body nested too deeply"
+    if isinstance(v, list):
+        for x in v:
+            why = _walk(x, depth + 1)
+            if why:
+                return why
+    elif isinstance(v, dict):
+        src = v.get("source")
+        if isinstance(src, dict) and src.get("type") not in ALLOW_SOURCES:
+            return f"content source type {src.get('type')!r} not allowed"
+        # A tool call's arguments are the agent's own JSON, not content blocks: a parameter that
+        # happens to be called "source" there means nothing to the server.
+        skip = "input" if v.get("type") in ("tool_use", "server_tool_use") else None
+        for k, x in v.items():
+            if k == skip:
+                continue
+            why = _walk(x, depth + 1)
+            if why:
+                return why
+    return None
 
 
 def body_policy(body):
     """Return (reason, request): reason is None if the body may be forwarded."""
     try:
         req = json.loads(body)
-    except ValueError:
+    except (ValueError, RecursionError):
         return "body is not JSON", None
     if not isinstance(req, dict):
         return "body is not a JSON object", None
-    for k in DENY_FIELDS:
-        if k in req:
+    for k in req:
+        if k not in ALLOW_FIELDS:
             return f"field {k!r} not allowed", req
     tools = req.get("tools") or []
     if not isinstance(tools, list):
         return "tools is not a list", req
+    # Client tools, which the agent runs itself, have no "type" (or "custom"); server tools all do.
     for t in tools:
         typ = t.get("type") if isinstance(t, dict) else "?"
         if typ not in (None, "custom"):
             return f"server tool {typ!r} not allowed", req
+    # Sources anywhere in the content: messages, tool_result content, documents nested in documents,
+    # system blocks. Not tool definitions: an input_schema is a schema, never fetched.
+    why = _walk(req.get("messages")) or _walk(req.get("system"))
+    if why:
+        return why, req
     return None, req
 
 
@@ -223,7 +271,14 @@ class LogLimit:
 LOG_LIMIT = LogLimit()
 
 
+def printable(s):
+    """Escape control characters: the guest chooses parts of every log line (method, path, error
+    text), and the log is shown on the owner's terminal, so no escape sequence may pass through."""
+    return "".join(c if c.isprintable() else repr(c)[1:-1] for c in s)
+
+
 def log(line, always=False):
+    line = printable(line)
     stamp = time.strftime("%H:%M:%S ")
     if not always:
         dropped = LOG_LIMIT.admit()
@@ -271,8 +326,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.headers.get("Transfer-Encoding") or length is None:
             log(f"DENY  {self.command} {path_only} (no Content-Length)")
             return self.deny(411, "Content-Length required")
+        # Digits only: int() would also take signs, spaces and underscores, and raise on anything else.
+        if not (length.isascii() and length.isdigit() and len(length) <= 9):
+            log(f"DENY  {self.command} {path_only} (bad Content-Length)")
+            return self.deny(400, "bad Content-Length")
         n = int(length)
-        if n < 0 or n > MAX_BODY:
+        if n > MAX_BODY:
             log(f"DENY  {self.command} {path_only} (body {n} bytes)")
             return self.deny(413, "request body too large")
         body = self.rfile.read(n)
@@ -372,6 +431,12 @@ class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
         except Exception:
             self.slots.release()
             raise
+
+    def handle_error(self, request, client_address):
+        # The default prints a traceback to stderr, outside the log's rate limit and cap, so a guest
+        # that can trigger one at will could grow the host log without bound. One limited line instead.
+        e = sys.exc_info()[1]
+        log(f"ERROR handler: {type(e).__name__}: {e}")
 
     def process_request_thread(self, request, client_address):
         try:

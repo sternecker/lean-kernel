@@ -14,10 +14,13 @@
 #   the jailer has chrooted it, so the config can't name anything outside the jail.
 #
 # Per run:
-#   /srv/lean-agent/firecracker/<id>/root   chroot, owned by lean-fc: kernel and root image (read-only
-#                                           copies), the scratch drive, the config, the vsock socket
+#   /srv/lean-agent/firecracker/<id>/root   chroot: kernel and root image (read-only copies), the scratch
+#                                           drive, the config, the vsock socket. Root-owned while root fills
+#                                           it, handed to the run's Firecracker uid only just before launch.
 #   /srv/lean-agent/firecracker/<id>/proxy  the proxy's directory, owned by lean-proxy
-#   Firecracker: uid lean-fc, chroot, its own empty network namespace (no route anywhere), cgroup
+#   Firecracker: a uid of its own for this run (FC_UID_BASE.., no passwd entry; claimed in /run, so two
+#     concurrent VMs never share one and can't reach each other's chroot), chroot, its own empty network
+#     namespace (no route anywhere), cgroup
 #     limits (memory, pids, cpu) under /sys/fs/cgroup/lean-agent/<id>, fd limit, and its own seccomp
 #   proxy: uid lean-proxy, no groups, no capabilities, no_new_privs, its own cgroup (memory, tasks),
 #     at most 16 guest connections, 30 s idle timeout, a rate-limited and capped log. The token arrives on a pipe.
@@ -45,8 +48,49 @@ source "$CONF"   # OWNER REPO OUT TOKEN_FILE MEM_MAX PIDS_MAX CPU_MAX CGROUPS
 [[ "${SUDO_USER:-}" == "$OWNER" ]] || die "only $OWNER may run this"
 owner_gid="$(id -g "$OWNER")"
 as_owner() { setpriv --reuid="$OWNER" --regid="$owner_gid" --init-groups --no-new-privs -- "$@"; }
-fc_uid="$(id -u lean-fc)"; fc_gid="$(id -g lean-fc)"
 id -u lean-proxy >/dev/null || die "user lean-proxy missing; run scripts/jail-setup.sh"
+
+# Firecracker's uid: one per run, as the jailer docs recommend. With one shared uid, a Firecracker
+# compromised in one run could read or replace the files of any other run going at the same time.
+# The uids have no passwd entry. A claim file in /run (tmpfs: gone after a reboot) holds the wrapper's
+# pid; a claim whose pid is gone is free again. A uid is skipped if anything else could be using it: a
+# passwd or group entry, a subuid/subgid range (rootless containers), a process, or files left in
+# $BASE by a run that died without cleaning up.
+FC_UID_BASE="${FC_UID_BASE:-2000000000}"
+FC_UID_COUNT="${FC_UID_COUNT:-64}"
+[[ "$FC_UID_BASE" =~ ^[1-9][0-9]{5,9}$ && "$FC_UID_COUNT" =~ ^[1-9][0-9]{0,3}$ ]] \
+  && (( FC_UID_BASE + FC_UID_COUNT < 2147483647 )) || die "bad FC_UID_BASE/FC_UID_COUNT in $CONF"
+UID_DIR=/run/lean-agent/uids
+fc_uid=""; fc_gid=""; fc_claim=""
+uid_in_use() {
+  local u="$1"
+  { getent passwd "$u" || getent group "$u"; } >/dev/null && return 0
+  awk -F: -v u="$u" '$2 <= u && u < $2 + $3 { f = 1 } END { exit !f }' /etc/subuid /etc/subgid 2>/dev/null && return 0
+  pgrep -u "$u" >/dev/null && return 0
+  [[ -d "$BASE/firecracker" && -n "$(find "$BASE/firecracker" -maxdepth 3 \( -user "$u" -o -group "$u" \) -print -quit)" ]] && return 0
+  return 1
+}
+uid_claimed() {  # a claim file whose wrapper is still running
+  local p
+  [[ -f "$UID_DIR/$1" ]] || return 1
+  p="$(<"$UID_DIR/$1")"
+  [[ "$p" =~ ^[0-9]+$ ]] && kill -0 "$p" 2>/dev/null
+}
+alloc_fc_uid() {
+  local u
+  install -d -o root -g root -m 0700 /run/lean-agent "$UID_DIR"
+  exec 9>"$UID_DIR/.lock"
+  flock 9
+  for (( u = FC_UID_BASE; u < FC_UID_BASE + FC_UID_COUNT; u++ )); do
+    uid_claimed "$u" && continue
+    uid_in_use "$u" && continue
+    echo "$$" > "$UID_DIR/$u"
+    fc_uid="$u"; fc_gid="$u"; fc_claim="$UID_DIR/$u"
+    break
+  done
+  exec 9>&-
+  [[ -n "$fc_uid" ]] || die "no free Firecracker uid in $FC_UID_BASE..$((FC_UID_BASE + FC_UID_COUNT - 1))"
+}
 
 # Egress for lean-proxy: TCP 443 to the API's addresses, nothing else (no DNS either: the proxy gets
 # the addresses). The table persists across runs; each run adds the addresses it resolved, which
@@ -123,7 +167,12 @@ if [[ "${1:-}" == "--check" ]]; then
   done
   echo "jailer:      $("$LIB/jailer" --version | head -1)"
   echo "firecracker: $("$LIB/firecracker" --version | head -1)"
-  echo "users:       lean-fc $fc_uid:$fc_gid, lean-proxy $(id -u lean-proxy):$(id -g lean-proxy)"
+  free=0
+  for (( u = FC_UID_BASE; u < FC_UID_BASE + FC_UID_COUNT; u++ )); do
+    uid_claimed "$u" || uid_in_use "$u" || free=$((free + 1))
+  done
+  (( free > 0 )) || die "no free Firecracker uid in $FC_UID_BASE..$((FC_UID_BASE + FC_UID_COUNT - 1))"
+  echo "users:       Firecracker: a uid per run from $FC_UID_BASE ($free of $FC_UID_COUNT free), lean-proxy $(id -u lean-proxy):$(id -g lean-proxy)"
   echo "owner:       $OWNER, out $OUT"
   as_owner test -r "$TOKEN_FILE" || die "token $TOKEN_FILE not readable by $OWNER"
   echo "token:       $TOKEN_FILE (mode $(as_owner stat -c %a "$TOKEN_FILE"))"
@@ -164,14 +213,14 @@ tok_mode="$(as_owner stat -c %a "$TOKEN_FILE")" || die "can't read $TOKEN_FILE a
 id="agent-$(date +%Y%m%d-%H%M%S)-$$"
 run="$BASE/firecracker/$id"; jail="$run/root"; pdir="$run/proxy"; ns="lean-$id"
 proxy=""; fc=""; started=0
-as_fc() { setpriv --reuid=lean-fc --regid=lean-fc --clear-groups --no-new-privs -- "$@"; }
+as_fc() { setpriv --reuid="$fc_uid" --regid="$fc_gid" --clear-groups --no-new-privs -- "$@"; }
 cleanup() {
   local rc=$?
   [[ -n "$fc" ]] && { kill "$fc" 2>/dev/null; wait "$fc" 2>/dev/null || true; }
   [[ -n "$proxy" ]] && { kill "$proxy" 2>/dev/null; wait "$proxy" 2>/dev/null || true; }
   # Keep the agent's home: copy the scratch drive back to OUT (for KEEP_SCRATCH=1). Once Firecracker
-  # has run, everything under $jail is lean-fc's: read it as lean-fc, never as root, or a swapped-in
-  # symlink would make root copy out a file lean-fc can't read.
+  # has run, everything under $jail is its uid's: read it as that uid, never as root, or a swapped-in
+  # symlink would make root copy out a file Firecracker's uid can't read.
   # Only after a VM ran: an early failure must not overwrite OUT's copy with nothing.
   if [[ $started == 1 ]]; then
     as_fc cat -- "$jail/scratch.ext4" 2>/dev/null | as_owner sh -c 'cat > "$1.new" && mv -f -- "$1.new" "$1"' sh "$OUT/scratch-agent.ext4" || true
@@ -180,30 +229,39 @@ cleanup() {
   [[ -d "/sys/fs/cgroup/$CG_PARENT/$id" ]] && rmdir "/sys/fs/cgroup/$CG_PARENT/$id" 2>/dev/null || true
   [[ -d "/sys/fs/cgroup/$CG_PARENT/$id-proxy" ]] && rmdir "/sys/fs/cgroup/$CG_PARENT/$id-proxy" 2>/dev/null || true
   [[ "$run" == "$BASE/firecracker/agent-"* ]] && rm -rf -- "$run"
+  # Release the uid last, once nothing of this run is left that it owns.
+  if [[ -n "$fc_claim" ]]; then
+    pkill -KILL -u "$fc_uid" 2>/dev/null || true
+    rm -f -- "$fc_claim"
+  fi
   exit "$rc"
 }
 trap cleanup EXIT
 # Signals (TIMEOUT, ctrl-c in a cooked terminal) end the run; cleanup stops Firecracker first.
 trap 'exit 130' INT TERM HUP
 
+alloc_fc_uid
 mkdir -p "$BASE/firecracker" && chmod 0711 "$BASE" "$BASE/firecracker"
 mkdir -m 0711 "$run"
+# Both directories stay root-owned while root writes into them, so nothing can plant a symlink for
+# root's writes to follow. Each goes to its user only once it's complete: $pdir before the proxy
+# starts, $jail just before Firecracker does.
 mkdir -m 0700 "$jail" "$pdir"
-chown lean-fc:lean-fc "$jail"
-chown lean-proxy:lean-proxy "$pdir"
 
-put() {  # put SRC DEST MODE OWNER: read SRC as OWNER, write DEST as root
+put() {  # put SRC DEST MODE OWNER: read SRC as OWNER, write DEST (new, in a root-owned dir) as root
+  [[ ! -e "$2" && ! -L "$2" ]] || die "$2 already exists"
   as_owner cat -- "$1" > "$2" || die "can't read $1"
-  chmod "$3" "$2"; chown "$4" "$2"
+  chmod "$3" "$2"; chown -h "$4" "$2"
 }
 put "$OUT/bzImage"            "$jail/bzImage"      0444 root:root
 put "$OUT/rootfs-agent.ext4"  "$jail/rootfs.ext4"  0444 root:root
-put "$OUT/scratch-agent.ext4" "$jail/scratch.ext4" 0600 lean-fc:lean-fc
+put "$OUT/scratch-agent.ext4" "$jail/scratch.ext4" 0600 "$fc_uid:$fc_gid"
 put "$OUT/vm-jail.json"       "$jail/vm.json"      0444 root:root
 # Largest file Firecracker may write: the scratch drive it was given, plus a little. A write past
 # RLIMIT_FSIZE fails, so this must not be smaller than the drive.
 FSIZE_MAX=$(( $(stat -c %s "$jail/scratch.ext4") + 64 * 1024 * 1024 ))
 put "$REPO/scripts/api-proxy.py" "$pdir/api-proxy.py" 0444 root:root
+chown lean-proxy:lean-proxy "$pdir"
 
 egress_setup
 # The proxy: its own user, no groups, no capabilities. Token on fd 0, log appended to OUT as OWNER.
@@ -226,10 +284,15 @@ fi
 for _ in $(seq 50); do [[ -S "$pdir/p.sock" ]] && break; sleep 0.1; done
 [[ -S "$pdir/p.sock" ]] || die "api-proxy did not start; see $OUT/agent-proxy.log"
 # Firecracker turns a guest connection to vsock port 8080 into a connect to v.sock_8080 in the chroot.
-# A hard link puts the proxy's socket there; owning it lets lean-fc connect.
+# A hard link puts the proxy's socket there; owning it lets Firecracker's uid connect. Checked again on
+# the link itself: lean-proxy owns $pdir and could have swapped p.sock between the test and the ln.
 [[ -S "$pdir/p.sock" && ! -L "$pdir/p.sock" ]] || die "proxy socket is not a socket"
 ln -P -- "$pdir/p.sock" "$jail/v.sock_8080"
-chown -h lean-fc:lean-fc "$jail/v.sock_8080"
+[[ -S "$jail/v.sock_8080" && ! -L "$jail/v.sock_8080" && "$(stat -c %U "$jail/v.sock_8080")" == lean-proxy ]] \
+  || die "proxy socket changed under us"
+chown -h "$fc_uid:$fc_gid" "$jail/v.sock_8080"
+# The chroot is complete: hand it to this run's Firecracker uid (it creates the vsock socket there).
+chown -h "$fc_uid:$fc_gid" "$jail"
 
 # An empty network namespace: Firecracker needs no network (vsock only) and gets none.
 ip netns add "$ns"

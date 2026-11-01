@@ -153,8 +153,15 @@ if [ "$agent_mode" = selftest ]; then
   echo; echo "AGENT-EXIT=$((r1 + r2))"
 elif [ "$agent_mode" = headless ]; then
   echo "AGENT-START"
-  $T "$@" /bin/bash -c 'claude -p "$(cat /home/agent/.task)" --allowedTools "$(cat /home/agent/.tools)" </dev/null 2>&1'
-  rc=$?; echo; echo "AGENT-EXIT=$rc"   # own line: claude may leave a terminal escape unterminated
+  # Every line the agent prints is prefixed "| ", so none can pose as a marker that run-agent.sh reads
+  # from this stream (AGENT-EXIT=, DENIALS-*). Its fds 0-2 are a file and a pipe, never the console:
+  # jail-exec grants the terminal on fds 0-2, and the console would let it write unprefixed lines.
+  # A process the agent leaves holding the pipe keeps sed waiting; TIMEOUT then ends the run as failed.
+  set -o pipefail
+  $T "$@" /bin/bash -c 'claude -p "$(cat /home/agent/.task)" --allowedTools "$(cat /home/agent/.tools)" 2>&1' \
+    </dev/null 2>&1 | sed 's/^/| /'
+  rc=$?; set +o pipefail
+  echo; echo "AGENT-EXIT=$rc"   # own line: claude may leave a terminal escape unterminated
 else
   # New session with ttyS0 as its controlling terminal (setsid -c), so job control and ctrl-c work.
   # The tty is acquired as root, then inherited across jail-exec's privilege drop.

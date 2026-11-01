@@ -51,7 +51,7 @@ make syscalls  # lists present and compiled-out syscalls from out/vmlinux
 make test      # boots the probe guest headless; fails if any cut or hardening check doesn't hold
 make run       # boots in Firecracker; ctrl-a x does nothing here, use `reboot -f` (exits Firecracker; `poweroff -f` only halts)
 make agent-rootfs  # read-only image with Claude Code, bash, socat, jail-exec (root-owned, via fakeroot)
-make agent     # Claude Code in the VM; credential stays in a host proxy (HOWTO §9.5)
+make agent     # Claude Code in the VM; credential stays in a host proxy (HOWTO §9.5); needs the jail (§9.2) or JAIL=0
 make agent-test   # the agent VM's hardening, checked from inside it (no Claude Code, no tokens)
 ```
 
