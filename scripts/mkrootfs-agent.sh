@@ -66,7 +66,8 @@ AGENT_UID=$AGENT_UID
 EOF
 cat >> "$stage/init" <<'EOF'
 fail() { echo "AGENT-EXIT=init: $*"; reboot -f; }
-mount -t proc -o nosuid,nodev,noexec proc /proc || fail "mount /proc"
+# hidepid=invisible: the agent sees only its own processes, not init, socat or other uids.
+mount -t proc -o nosuid,nodev,noexec,hidepid=invisible proc /proc || fail "mount /proc"
 mount -t sysfs -o nosuid,nodev,noexec sys /sys || fail "mount /sys"
 # The kernel mounts devtmpfs on /dev itself (DEVTMPFS_MOUNT); remount it nosuid,noexec.
 mount -o remount,nosuid,noexec /dev || fail "remount /dev"
@@ -88,6 +89,7 @@ i=0; while ! grep -q ':1F90 00000000:0000 0A' /proc/net/tcp; do
 done
 
 cd /home/agent
+umask 077   # inherited by the agent: files it creates are private to it
 set -- env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/agent USER=agent LOGNAME=agent SHELL=/bin/bash \
   TERM="${agent_term:-xterm-256color}" LANG=C.UTF-8 \
   ANTHROPIC_BASE_URL=http://127.0.0.1:8080 \

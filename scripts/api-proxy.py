@@ -4,7 +4,8 @@
 Listens on a Unix socket: Firecracker turns a guest connection to vsock CID 2 port P into a
 connection to <uds_path>_P on the host. Takes plain HTTP from the guest, strips whatever credential
 the guest sent, adds the real one, and forwards to https://api.anthropic.com over verified TLS.
-Only allowlisted method+path pairs are forwarded; everything else gets a 403 and a DENY log line.
+Only allowlisted method+path pairs are forwarded, and only bodies without server-side tools or MCP
+servers (see body_policy); everything else gets a 403 and a DENY log line.
 Responses are relayed as they arrive (Claude streams server-sent events).
 
 The credential is read from a file at startup and exists only in this process:
@@ -16,6 +17,7 @@ Usage: api-proxy.py --listen /path/vsock.sock_8080 --token-file ~/.config/lean-k
 import argparse
 import http.client
 import http.server
+import json
 import os
 import socket
 import socketserver
@@ -33,6 +35,32 @@ HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", 
        "transfer-encoding", "upgrade", "host", "content-length"}
 DROP_IN = HOP | {"authorization", "x-api-key", "accept-encoding", "cookie"}
 MAX_BODY = 32 << 20
+# Request fields that make Anthropic's servers reach out on the agent's behalf: server tools (web
+# fetch/search, code execution, ...) and remote MCP servers. Any of them turns the API into a route
+# to arbitrary hosts, e.g. a URL with data in its query string. Client tools, which the agent runs
+# itself, have no "type" (or "custom"), so only those pass.
+DENY_FIELDS = ("mcp_servers", "container")
+
+
+def body_policy(body):
+    """Return None if the request body may be forwarded, else the reason it may not."""
+    try:
+        req = json.loads(body)
+    except ValueError:
+        return "body is not JSON"
+    if not isinstance(req, dict):
+        return "body is not a JSON object"
+    for k in DENY_FIELDS:
+        if k in req:
+            return f"field {k!r} not allowed"
+    tools = req.get("tools") or []
+    if not isinstance(tools, list):
+        return "tools is not a list"
+    for t in tools:
+        typ = t.get("type") if isinstance(t, dict) else "?"
+        if typ not in (None, "custom"):
+            return f"server tool {typ!r} not allowed"
+    return None
 
 TOKEN = ""
 TLS = ssl.create_default_context()
@@ -80,6 +108,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             log(f"DENY  {self.command} {path_only} (body {n} bytes)")
             return self.deny(413, "request body too large")
         body = self.rfile.read(n)
+        why = body_policy(body)
+        if why:
+            log(f"DENY  {self.command} {path_only} ({why})")
+            return self.deny(403, why)
 
         headers = {k: v for k, v in self.headers.items() if k.lower() not in DROP_IN}
         headers["Authorization"] = "Bearer " + TOKEN

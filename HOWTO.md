@@ -256,7 +256,11 @@ TASK='List the files in / and say what this machine is.' make agent   # headless
 The path: `claude` in the guest -> `127.0.0.1:8080` -> socat (as nobody, under jail-exec) -> vsock CID 2
 port 8080 -> `out/vsock-agent.sock_8080` -> `scripts/api-proxy.py` on the host -> `https://api.anthropic.com`.
 The guest holds only a placeholder token. The proxy swaps in the real one, forwards only `POST /v1/messages`
-and `/v1/messages/count_tokens`, and logs one line per request to `out/agent-proxy.log`. The guest has no other
+and `/v1/messages/count_tokens`, and logs one line per request to `out/agent-proxy.log`. It also rejects any
+request that asks Anthropic's servers to reach out for the agent: server tools (`web_fetch`, `web_search`, code
+execution) and `mcp_servers`. Otherwise a URL with data in its query string would be a way out. Claude Code's WebSearch
+tool is therefore unavailable in the VM. In the guest, `/proc` is `hidepid=invisible`, so the agent sees only its own
+processes, and the agent runs with `umask 077`. The guest has no other
 route out. Root is read-only. `/home/agent` is a fresh 512 MB scratch drive each run (`KEEP_SCRATCH=1` keeps it).
 `/tmp` and `/home/agent` are mounted `noexec`. With `vm.memfd_noexec=2` and no interpreter in the image that
 loads native code, the agent can't run a binary it wrote, which is what most kernel exploits need. `AGENT_EXEC=1 make agent`
