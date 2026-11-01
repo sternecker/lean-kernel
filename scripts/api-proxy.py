@@ -99,10 +99,32 @@ def _walk(v, depth=0):
     return None
 
 
+class DuplicateKey(ValueError):
+    pass
+
+
+def _no_duplicates(pairs):
+    # Python keeps the last copy of a repeated key; another parser may keep the first. A body that
+    # means one thing here and another upstream would get past every check below, so refuse it.
+    obj = {}
+    for k, v in pairs:
+        if k in obj:
+            raise DuplicateKey(k)
+        obj[k] = v
+    return obj
+
+
+def _no_constant(name):
+    raise ValueError(f"{name} is not JSON")
+
+
 def body_policy(body):
-    """Return (reason, request): reason is None if the body may be forwarded."""
+    """Return (reason, request): reason is None if the body may be forwarded. The caller forwards
+    canonical(request), never the bytes it received, so upstream parses exactly what was checked."""
     try:
-        req = json.loads(body)
+        req = json.loads(body, object_pairs_hook=_no_duplicates, parse_constant=_no_constant)
+    except DuplicateKey as e:
+        return f"duplicate key {str(e)!r}", None
     except (ValueError, RecursionError):
         return "body is not JSON", None
     if not isinstance(req, dict):
@@ -124,6 +146,11 @@ def body_policy(body):
     if why:
         return why, req
     return None, req
+
+
+def canonical(req):
+    """The checked request, re-encoded: plain ASCII JSON, one copy of every key."""
+    return json.dumps(req, ensure_ascii=True, allow_nan=False, separators=(",", ":")).encode()
 
 
 class Budget:
@@ -339,6 +366,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if why:
             log(f"DENY  {self.command} {path_only} ({why})")
             return self.deny(403, why)
+        body = canonical(req)  # forward what was checked, not what was sent
         refused = BUDGET.admit(req.get("model"))
         if refused:
             code, etype, msg = refused

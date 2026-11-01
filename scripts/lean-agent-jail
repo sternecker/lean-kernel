@@ -76,11 +76,40 @@ uid_claimed() {  # a claim file whose wrapper is still running
   p="$(<"$UID_DIR/$1")"
   [[ "$p" =~ ^[0-9]+$ ]] && kill -0 "$p" 2>/dev/null
 }
+# A run whose wrapper was killed outright (SIGKILL, power loss mid-run) never ran cleanup: its chroot
+# (with a copy of the agent's home), cgroups, netns and possibly its Firecracker and proxy are left
+# behind, and its uid stays skipped. Each run reaps those first, under the uid lock. A run is stale
+# when the pid at the end of its id is no longer a lean-agent-jail process.
+reap_stale() {
+  local d id pid u cg
+  for d in "$BASE"/firecracker/agent-*; do
+    [[ -d "$d" && ! -L "$d" ]] || continue
+    id="${d##*/}"
+    [[ "$id" =~ ^agent-[0-9]{8}-[0-9]{6}-([0-9]+)$ ]] || continue
+    pid="${BASH_REMATCH[1]}"
+    [[ -r "/proc/$pid/cmdline" ]] && tr '\0' ' ' < "/proc/$pid/cmdline" | grep -q lean-agent-jail && continue
+    echo "lean-agent-jail: reaping stale run $id" >&2
+    for cg in "/sys/fs/cgroup/$CG_PARENT/$id" "/sys/fs/cgroup/$CG_PARENT/$id-proxy"; do
+      [[ -f "$cg/cgroup.kill" ]] && echo 1 > "$cg/cgroup.kill"
+    done
+    u="$(stat -c %u "$d/root" 2>/dev/null || true)"
+    if [[ "$u" =~ ^[0-9]+$ ]] && (( u >= FC_UID_BASE && u < FC_UID_BASE + FC_UID_COUNT )); then
+      pkill -KILL -u "$u" 2>/dev/null || true
+    fi
+    sleep 0.2
+    for cg in "/sys/fs/cgroup/$CG_PARENT/$id" "/sys/fs/cgroup/$CG_PARENT/$id-proxy"; do
+      [[ -d "$cg" ]] && rmdir "$cg" 2>/dev/null || true
+    done
+    ip netns del "lean-$id" 2>/dev/null || true
+    rm -rf -- "$d"
+  done
+}
 alloc_fc_uid() {
   local u
   install -d -o root -g root -m 0700 /run/lean-agent "$UID_DIR"
   exec 9>"$UID_DIR/.lock"
   flock 9
+  reap_stale
   for (( u = FC_UID_BASE; u < FC_UID_BASE + FC_UID_COUNT; u++ )); do
     uid_claimed "$u" && continue
     uid_in_use "$u" && continue

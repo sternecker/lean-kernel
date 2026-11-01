@@ -52,10 +52,12 @@ if [[ "${KEEP_SCRATCH:-0}" != "1" || ! -f "$scratch" ]]; then
 fi
 
 # Guest output shown on this terminal: drop control characters (C0 except tab and newline, DEL, C1),
-# so nothing the guest prints can send escape sequences to the host's terminal emulator.
+# so nothing the guest prints can send escape sequences to the host's terminal emulator, and the
+# bidi/format controls (U+061C, U+200B-U+200F, U+202A-U+202E, U+2066-U+2069, U+FEFF) that reorder or
+# hide text on screen.
 sanitize() {
   python3 -I -c 'import re, sys
-sys.stdout.write(re.sub(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]", "", sys.stdin.buffer.read().decode("utf-8", "replace")))'
+sys.stdout.write(re.sub(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u061c\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]", "", sys.stdin.buffer.read().decode("utf-8", "replace")))'
 }
 # The guest's exit status: the last AGENT-EXIT line init printed (agent lines are prefixed "| ").
 agent_exit() { grep '^AGENT-EXIT=' "$OUT/agent.log" | tail -n 1; }
