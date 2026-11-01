@@ -159,8 +159,8 @@ control-flow integrity on indirect calls, kCFI by default via `CFI_AUTO_DEFAULT=
     an AF_UNIX shim (`socat UNIX-LISTEN:/run/egress.sock,fork VSOCK-CONNECT:2:8080`, then
     `curl --unix-socket`). A loopback TCP shim needs `INET` and only works in the default profile.
     Checked by hand against 6.18.58 Kconfig: `VSOCKETS` sits under `if NET`, outside `if INET`, and
-    nothing selects `INET`, `PACKET` or `VIRTIO_NET`. Since confirmed: `VSOCK_ONLY=1` builds and passed
-    `make test` on 2026-10-31 (`out-vsock/`); rerun it, the jailed-check minimum has risen since.
+    nothing selects `INET`, `PACKET` or `VIRTIO_NET`. Since confirmed: `VSOCK_ONLY=1` builds and passes
+    `make check` and `make test` (`out-vsock/`, 2026-11-01).
 - Does the authz sidecar see the agent's *tool call* (structured) or only the resulting HTTP request?
   Per-tool policy needs the former, or a convention that maps tools to distinct hosts/paths.
   - *Leaning (2026-10-30):* have the agent's tools call the proxy with structured requests (tool name

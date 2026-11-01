@@ -20,6 +20,7 @@ fi
 [[ -z "$(git -C "$khc" status --porcelain)" ]] || die "kernel-hardening-checker checkout has local changes; refusing to run it"
 
 build=gcc; [[ "$LLVM" == "1" ]] && build=clang
+profile=default; [[ "$VSOCK_ONLY" == "1" ]] && profile=vsock
 report="$(cd "$khc" && python3 -I ./bin/kernel-hardening-checker -c "$OUT/.config" -m show_fail)" \
   || die "kernel-hardening-checker failed to run"
 echo "$report"
@@ -28,7 +29,7 @@ echo
 declare -A accepted=()
 while read -r opt which _; do
   [[ -z "$opt" || "$opt" == \#* ]] && continue
-  [[ "$which" == all || "$which" == "$build" ]] && accepted[$opt]=1
+  [[ "$which" == all || "$which" == "$build" || "$which" == "$profile" ]] && accepted[$opt]=1
 done < "$ROOT/configs/checker-accepted.txt"
 
 declare -A failing=()
@@ -40,7 +41,7 @@ done < <(awk -F'|' '$NF ~ /FAIL/ { gsub(/ /, "", $1); if ($1 ~ /^CONFIG_/) print
 for opt in "${!accepted[@]}"; do
   [[ -v "failing[$opt]" ]] || echo "note: $opt is accepted for $build builds but passes now; remove it from configs/checker-accepted.txt"
 done
-echo "checker FAILs: ${#failing[@]}, accepted for $build builds: $(( ${#failing[@]} - ${#new[@]} )), not accepted: ${#new[@]}"
+echo "checker FAILs: ${#failing[@]}, accepted for $build builds ($profile profile): $(( ${#failing[@]} - ${#new[@]} )), not accepted: ${#new[@]}"
 if [[ ${#new[@]} -gt 0 ]]; then
   printf 'not accepted: %s\n' "${new[@]}" >&2
   die "new hardening-checker FAILs. Fix the config, or review each and add it to configs/checker-accepted.txt with the reason"

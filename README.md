@@ -22,6 +22,7 @@ configs/
   checker-accepted.txt   kernel-hardening-checker FAILs reviewed and accepted, each with its reason
 scripts/
   _env.sh                shared settings for every script (paths, toolchain, VERSION)
+  all.sh                 make all: every non-interactive step in order, with a timing summary
   deps-check.sh          what's missing on this host
   fetch-kernel.sh        download + verify the pinned longterm tarball into work/
   configure.sh           base + fragment(s) -> out/.config, then PROVE every fragment line stuck
@@ -51,6 +52,8 @@ out/                     bzImage, vmlinux + System.map, .config, images; runs/<i
 ## Workflow
 
 ```sh
+make all       # every step below that needs no input and spends no tokens, stopping at the first failure
+               # (scripts/all.sh --vsock adds the vsock-only profile; --no-agent skips the agent steps)
 make deps      # lists missing packages; prints the apt line
 make fetch     # kernel tarball, sha256 verified against kernel.org
 make config    # merge base + lean.fragment, fail if any option was dropped by a dependency

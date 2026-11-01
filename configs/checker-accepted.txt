@@ -1,5 +1,6 @@
 # kernel-hardening-checker FAILs reviewed and accepted for this guest. make check fails on any
-# other FAIL. Format: OPTION BUILD REASON, where BUILD is all, clang (LLVM=1) or gcc (LLVM=0).
+# other FAIL. Format: OPTION SCOPE REASON, where SCOPE is all, clang (LLVM=1), gcc (LLVM=0) or vsock
+# (VSOCK_ONLY=1, the profile without TCP/IP).
 # Remove a line when the checker stops failing it (make check says so). HOWTO "Accepted checker
 # failures" has the longer reasoning.
 
@@ -30,3 +31,6 @@ CONFIG_KSTACK_ERASE               gcc    needs clang's stack-depth callback (or 
 CONFIG_KSTACK_ERASE_METRICS       gcc    reported with KSTACK_ERASE
 CONFIG_KSTACK_ERASE_RUNTIME_DISABLE gcc  reported with KSTACK_ERASE
 CONFIG_CFI_AUTO_DEFAULT           gcc    CFI needs clang
+
+# The vsock-only profile (configs/vsock-only.fragment): no TCP/IP, so TCP-only options don't exist.
+CONFIG_SYN_COOKIES                vsock  no TCP in this profile, so no listener to SYN-flood; on in the default profile

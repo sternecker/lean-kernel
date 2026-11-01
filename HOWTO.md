@@ -7,8 +7,8 @@ and the optional tap device. Commands assume you are in the repo root.
 
 Working on the development host:
 - The kernel (`linux-6.18.58`, pinned and sha256-verified) configures, builds and passes `make check` and
-  `make test` in the default profile (`out/`). The vsock-only profile (`out-vsock/`) passed on 2026-10-31
-  with 27 jailed checks; `test.sh` now expects 28 there, so rerun it before relying on it.
+  `make test` in both profiles, the default (`out/`) and vsock-only (`out-vsock/`); `scripts/all.sh --vsock`
+  runs every step for both.
 - The agent VM (9.5) runs Claude Code jailed: Firecracker under the jailer with a uid per run, the API proxy as
   `lean-proxy`, the credential outside the VM. `make agent-test` passes 31 checks.
 
@@ -426,7 +426,8 @@ Not yet:
 
 ## Accepted checker failures
 
-`make check` enforces this list, which lives in `configs/checker-accepted.txt` (option, which build, reason).
+`make check` enforces this list, which lives in `configs/checker-accepted.txt` (option, scope, reason). The scope
+is `all`, a compiler (`clang`, `gcc`) or a profile (`vsock`, for `VSOCK_ONLY=1` builds only).
 The checker itself is pinned (`KHC_COMMIT` in `VERSION`). To bump it, review its diff first, set the new commit,
 and rerun `make check`.
 
@@ -449,6 +450,10 @@ Chosen LSM stack (landlock, lockdown, yama):
 Checker naming lag (clang build):
 - `CFI_CLANG`, `CFI_PERMISSIVE`: 6.18 renamed the option to `CONFIG_CFI`; `CFI_CLANG` is a hidden
   transitional symbol. `CONFIG_CFI=y` and `CFI_PERMISSIVE` off are verified by `make config`.
+
+vsock-only profile (`VSOCK_ONLY=1`):
+- `SYN_COOKIES`: the profile has no TCP/IP, so the option doesn't exist and there is no TCP listener to
+  SYN-flood. The default profile keeps it on.
 
 Compiler-specific:
 - `GCC_PLUGIN_LATENT_ENTROPY`: gcc plugins only; no clang equivalent. Boot entropy comes from
