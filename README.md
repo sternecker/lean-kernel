@@ -8,6 +8,7 @@ The point: an agent that processes attacker-controlled content should not share 
 
 - `HOWTO.md`: step by step from here to a booted guest, expected outputs, troubleshooting, cadence, what comes after.
 - `NOTES.md`: why a separate kernel, what every cut and hardening option buys, honest limits, open questions.
+- `~/repos/lean-kernel-devtools` (local working copy, not published): the same jail with a developer agent image (Python, Node.js, gcc/make, nasm on a Debian base). Its README lists how it differs from this repo.
 
 ## Layout
 
