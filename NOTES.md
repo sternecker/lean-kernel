@@ -103,6 +103,8 @@ This repo is item 3, done so that item 2 is a build-time fact instead of a runti
 | `LSM="landlock,lockdown,yama"`, `SECCOMP_FILTER` | The in-guest sandbox stack from the reading still works as the second wall. |
 | `STATIC_USERMODEHELPER` with empty path | The kernel can't exec userspace helpers (`modprobe`, hotplug) on an attacker's behalf. |
 | `SECURITY_DMESG_RESTRICT` | No kernel address leaks via dmesg to unprivileged users. |
+| `sysctl.kernel.kptr_restrict=2` (boot arg) | `%pK` prints zeros instead of hashed pointers. Small on its own (KALLSYMS is off, `%p` already hashes), but it survives `no_hash_pointers` and a stray `%pK`. |
+| `sysctl.vm.memfd_noexec=2` (boot arg) | No executable memfds, so `memfd_create` + `execveat` can't run a binary without a file. Together with the agent image's `noexec` writable mounts, the agent can't run any binary it writes. |
 
 With the default clang build (`LLVM=0` for gcc drops these): `CFI` (6.18's name for `CFI_CLANG`; forward-edge
 control-flow integrity on indirect calls, kCFI by default via `CFI_AUTO_DEFAULT=n`),

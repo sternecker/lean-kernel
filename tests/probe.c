@@ -390,6 +390,49 @@ static void jail_exec_rejects(void)
 	}
 }
 
+static void expect_sysctl(const char *path, const char *want)
+{
+	char name[96], buf[32] = "";
+	snprintf(name, sizeof name, "%s = %s", path + strlen("/proc/sys/"), want);
+	FILE *f = fopen(path, "r");
+	if (!f) {
+		result(0, name, strerror(errno));
+		return;
+	}
+	if (!fgets(buf, sizeof buf, f))
+		buf[0] = 0;
+	fclose(f);
+	buf[strcspn(buf, "\n")] = 0;
+	result(strcmp(buf, want) == 0, name, buf);
+}
+
+// Boot-time sysctls from vm/vm.json.in. kptr_restrict=2: %pK prints zeros, not hashes.
+// memfd_noexec=2: no executable memfd, which closes memfd_create + execveat (fileless exec)
+// on top of noexec writable mounts in the agent image.
+static void boot_sysctls(void)
+{
+	expect_sysctl("/proc/sys/kernel/kptr_restrict", "2");
+	expect_sysctl("/proc/sys/vm/memfd_noexec", "2");
+	errno = 0;
+	long fd = syscall(SYS_memfd_create, "probe-exec", 0x0010u /* MFD_EXEC */);
+	expect_errno("memfd_create(MFD_EXEC)", fd, EACCES);
+	if (fd >= 0)
+		close((int)fd);
+	// Without flags the kernel must hand out a non-executable, sealed memfd.
+	errno = 0;
+	fd = syscall(SYS_memfd_create, "probe-plain", 0);
+	if (fd < 0) {
+		result(0, "plain memfd is noexec", strerror(errno));
+	} else {
+		struct stat st;
+		int ok = fstat((int)fd, &st) == 0 && !(st.st_mode & 0111);
+		char d[64];
+		snprintf(d, sizeof d, "mode %04o", ok ? st.st_mode & 07777 : 0);
+		result(ok, "plain memfd is noexec", d);
+		close((int)fd);
+	}
+}
+
 static void run_all(void)
 {
 	cut_syscalls();
@@ -473,6 +516,7 @@ int main(int argc, char **argv)
 	lockdown_mode();
 	rootfs_ownership();
 	jail_exec_rejects();
+	boot_sysctls();
 	fflush(stdout);
 
 	pid_t p = fork();

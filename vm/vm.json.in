@@ -1,7 +1,7 @@
 {
   "boot-source": {
     "kernel_image_path": "@KERNEL@",
-    "boot_args": "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=/init lockdown=confidentiality random.trust_cpu=on spectre_bhi=on page_alloc.shuffle=1"
+    "boot_args": "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=/init lockdown=confidentiality random.trust_cpu=on spectre_bhi=on page_alloc.shuffle=1 sysctl.kernel.kptr_restrict=2 sysctl.vm.memfd_noexec=2"
   },
   "drives": [
     {

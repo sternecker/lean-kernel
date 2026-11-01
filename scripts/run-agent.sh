@@ -6,6 +6,7 @@
 #   TASK='...' make agent              headless: `claude -p "$TASK"`, output here and in out/agent.log
 #     TOOLS='Bash Read'                tools allowed without asking in headless mode (default: Bash)
 #   TOKEN_FILE=...                     default ~/.config/lean-kernel/oauth-token (chmod 600), from `claude setup-token`
+#   AGENT_EXEC=1                       allow exec on /tmp and /home/agent (default noexec)
 #   KEEP_SCRATCH=1                     reuse out/scratch-agent.ext4 instead of starting from an empty home
 #
 # The token stays in the proxy process. The guest gets a placeholder; Firecracker runs without it in its env.
@@ -37,13 +38,15 @@ vsock="$OUT/vsock-agent.sock"
 cfg="$OUT/vm-agent.json"
 sed -e "s|@KERNEL@|$OUT/bzImage|" -e "s|@ROOTFS@|$OUT/rootfs-agent.ext4|" -e "s|@VSOCK@|$vsock|" \
     "$ROOT/vm/vm.json.in" > "$cfg"
-python3 - "$cfg" "$scratch" "$mode" "$rows" "$cols" "${TERM:-xterm-256color}" <<'EOF'
+python3 - "$cfg" "$scratch" "$mode" "$rows" "$cols" "${TERM:-xterm-256color}" "${AGENT_EXEC:-0}" <<'EOF'
 import json, sys
-p, scratch, mode, rows, cols, term = sys.argv[1:]
+p, scratch, mode, rows, cols, term, agent_exec = sys.argv[1:]
 c = json.load(open(p))
 b = c["boot-source"]
 b["boot_args"] = b["boot_args"].replace(" rw ", " ro ") + \
-    f" agent_mode={mode} agent_rows={rows} agent_cols={cols} agent_term={term}"
+    f" agent_mode={mode} agent_exec={agent_exec} agent_rows={rows} agent_cols={cols} agent_term={term}"
+if mode == "interactive":  # keep boot messages off the raw terminal; out/agent.log has them in headless mode
+    b["boot_args"] += " quiet"
 c["drives"][0]["is_read_only"] = True
 c["drives"].append({"drive_id": "scratch", "path_on_host": scratch,
                     "is_root_device": False, "is_read_only": False})
@@ -70,5 +73,14 @@ if [[ "$mode" == headless ]]; then
   echo "agent: ok"
 else
   note "interactive agent VM; proxy log: $OUT/agent-proxy.log"
-  env -u ANTHROPIC_API_KEY -u CLAUDE_CODE_OAUTH_TOKEN "$FC" --no-api --config-file "$cfg"
+  # Raw host terminal: keystrokes reach the guest one by one and unchanged. In cooked mode the host
+  # tty buffers input until Enter and turns Enter (CR) into LF, which Claude Code reads as
+  # "newline in the prompt", not "submit"; ctrl-c would also kill Firecracker instead of reaching
+  # the guest. To get out of a hung guest, kill firecracker from another terminal.
+  if [[ -t 0 ]]; then
+    saved_tty="$(stty -g)"
+    trap 'rc=$?; stty "$saved_tty"; kill $proxy 2>/dev/null; wait $proxy 2>/dev/null || true; rm -f "$vsock" "${vsock}_8080"; exit $rc' EXIT
+    stty raw -echo
+  fi
+  env -u ANTHROPIC_API_KEY -u CLAUDE_CODE_OAUTH_TOKEN "$FC" --no-api --level Error --config-file "$cfg"
 fi

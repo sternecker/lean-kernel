@@ -4,7 +4,7 @@
 # static jail-exec. Built under fakeroot so every file is owned by root (mkfs.ext4 -d copies owners;
 # the plain busybox image in mkrootfs.sh does not do this yet). No root privileges needed.
 #
-# Guest init (below): mounts, loopback up, a jailed socat bridge from 127.0.0.1:8080 to vsock CID 2
+# Guest init (below): mounts (writable ones noexec unless AGENT_EXEC=1), loopback up, a jailed socat bridge from 127.0.0.1:8080 to vsock CID 2
 # port 8080 (the host's scripts/api-proxy.py), then the agent under jail-exec as AGENT_UID, then reboot.
 # Needs the default kernel profile: VSOCK_ONLY=1 removes TCP/IP, including the loopback the bridge uses.
 #
@@ -60,7 +60,7 @@ echo agent > "$stage/etc/hostname"
 
 cat > "$stage/init" <<EOF
 #!/bin/sh
-# Agent VM init. Kernel cmdline key=value params arrive as env vars: agent_mode, agent_rows, agent_cols, agent_term.
+# Agent VM init. Kernel cmdline key=value params arrive as env vars: agent_mode, agent_exec, agent_rows, agent_cols, agent_term.
 export PATH=/usr/local/bin:/usr/bin:/bin
 AGENT_UID=$AGENT_UID
 EOF
@@ -71,8 +71,12 @@ mount -t sysfs -o nosuid,nodev,noexec sys /sys || fail "mount /sys"
 # The kernel mounts devtmpfs on /dev itself (DEVTMPFS_MOUNT); remount it nosuid,noexec.
 mount -o remount,nosuid,noexec /dev || fail "remount /dev"
 mkdir -p /dev/pts && mount -t devpts -o nosuid,noexec,mode=620,ptmxmode=666 devpts /dev/pts || fail "mount /dev/pts"
-mount -t tmpfs -o nosuid,nodev,mode=1777,size=256m tmp /tmp || fail "mount /tmp"
-mount -t ext4 -o nosuid,nodev /dev/vdb /home/agent || fail "mount scratch drive /dev/vdb"
+# The only writable places. noexec + vm.memfd_noexec=2 (boot args) leave the agent no way to run a
+# binary it wrote: the root fs is read-only and the image has no interpreter that loads native code.
+# agent_exec=1 (AGENT_EXEC=1 make agent) lifts it for workloads that build and run code.
+wx=noexec; [ "$agent_exec" = 1 ] && wx=exec
+mount -t tmpfs -o nosuid,nodev,$wx,mode=1777,size=256m tmp /tmp || fail "mount /tmp"
+mount -t ext4 -o nosuid,nodev,$wx /dev/vdb /home/agent || fail "mount scratch drive /dev/vdb"
 hostname agent
 ip link set lo up || fail "loopback"
 [ "$agent_mode" = headless ] && echo 1 > /proc/sys/kernel/printk
@@ -93,15 +97,15 @@ set -- env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/agent USER=agent LOGN
 if [ "$agent_mode" = headless ]; then
   echo "AGENT-START"
   "$@" /bin/bash -c 'claude -p "$(cat /home/agent/.task)" --allowedTools "$(cat /home/agent/.tools)" </dev/null 2>&1'
-  echo "AGENT-EXIT=$?"
+  rc=$?; echo; echo "AGENT-EXIT=$rc"   # own line: claude may leave a terminal escape unterminated
 else
   # New session with ttyS0 as its controlling terminal (setsid -c), so job control and ctrl-c work.
   # The tty is acquired as root, then inherited across jail-exec's privilege drop.
-  export AGENT_UID
+  export AGENT_UID wx
   setsid -c /bin/sh -c '
     [ -n "$agent_rows" ] && stty rows "$agent_rows" cols "$agent_cols"
     echo
-    echo "agent VM: kernel $(uname -r), uid $AGENT_UID, root fs read-only, /home/agent is a scratch drive"
+    echo "agent VM: kernel $(uname -r), uid $AGENT_UID, root fs read-only, /home/agent and /tmp $wx"
     echo "run claude. exit powers the VM off."
     echo
     exec "$@" /bin/bash -l' sh "$@" </dev/ttyS0 >/dev/ttyS0 2>&1 &

@@ -130,7 +130,7 @@ make test
 Builds `tests/probe.c` and `guest/jail-exec.c` statically, puts them in a separate image
 (`out/rootfs-test.ext4`) whose init runs the probe and reboots, boots that headless with the same kernel
 command line as `make run`, and fails unless every check passes. Takes about 10 seconds after the build.
-Full console log: `out/test.log`. Expect `PROBE: root 80 / user 72 / jailed 12 passed, 0 failed`. The root pass includes the image-ownership checks and `jail-exec` bad-UID refusals.
+Full console log: `out/test.log`. Expect `PROBE: root 84 / user 72 / jailed 12 passed, 0 failed`. The root pass includes the image-ownership checks, `jail-exec` bad-UID refusals, and the boot sysctls (`kptr_restrict=2`, `memfd_noexec=2`, executable memfd refused).
 
 The probe runs three passes: as root, as uid 65534, and as uid 65534 under `jail-exec` (§6c).
 Cut code must be gone even for root:
@@ -258,6 +258,9 @@ port 8080 -> `out/vsock-agent.sock_8080` -> `scripts/api-proxy.py` on the host -
 The guest holds only a placeholder token. The proxy swaps in the real one, forwards only `POST /v1/messages`
 and `/v1/messages/count_tokens`, and logs one line per request to `out/agent-proxy.log`. The guest has no other
 route out. Root is read-only. `/home/agent` is a fresh 512 MB scratch drive each run (`KEEP_SCRATCH=1` keeps it).
+`/tmp` and `/home/agent` are mounted `noexec`. With `vm.memfd_noexec=2` and no interpreter in the image that
+loads native code, the agent can't run a binary it wrote, which is what most kernel exploits need. `AGENT_EXEC=1 make agent`
+lifts this for workloads that build and run code. The protection weakens once the image gains Python, Node or a compiler.
 VM memory is 2 GB. This needs the default kernel profile, because `VSOCK_ONLY=1` also removes loopback TCP.
 
 Not yet: the proxy runs unjailed as your user. Firecracker isn't under the jailer (9.2). Claude Code is the host's
