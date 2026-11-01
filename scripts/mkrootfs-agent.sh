@@ -105,6 +105,8 @@ mount -t proc -o nosuid,nodev,noexec,hidepid=invisible proc /proc || fail "mount
 mount -t sysfs -o ro,nosuid,nodev,noexec sys /sys || fail "mount /sys"
 # The kernel mounts devtmpfs on /dev itself (DEVTMPFS_MOUNT); remount it nosuid,noexec.
 mount -o remount,nosuid,noexec /dev || fail "remount /dev"
+# Kernel log: dmesg_restrict and Landlock already refuse the agent; the node itself root-only as well.
+chmod 0600 /dev/kmsg
 mkdir -p /dev/pts && mount -t devpts -o nosuid,noexec,mode=620,ptmxmode=666 devpts /dev/pts || fail "mount /dev/pts"
 # The only writable places. noexec + vm.memfd_noexec=2 (boot args) leave the agent no way to run a
 # binary it wrote: the root fs is read-only and the image has no interpreter that loads native code.

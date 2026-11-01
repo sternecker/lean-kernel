@@ -32,8 +32,8 @@ grep -q '^PROBE-EXIT=0$' "$OUT/test.log" || die "probe failed or did not finish;
 grep -q '^PROBE-JAILED-EXIT=0$' "$OUT/test.log" || die "jailed probe failed or did not finish; see $OUT/test.log"
 # Each pass must run at least this many checks: a section that silently stops running (a setup
 # step failing before its checks) shows up as a lower count, not as a pass. Raise these when adding checks.
-min_root=96 min_user=83 min_jailed=29
-grep -q "^# CONFIG_INET is not set" "$OUT/.config" && min_jailed=27
+min_root=96 min_user=83 min_jailed=30
+grep -q "^# CONFIG_INET is not set" "$OUT/.config" && min_jailed=28
 for pass in root:$min_root user:$min_user jailed:$min_jailed; do
   n="$(sed -n "s/^PROBE: ${pass%%:*} \([0-9]*\) passed.*/\1/p" "$OUT/test.log")"
   [[ -n "$n" && "$n" -ge "${pass##*:}" ]] || die "probe ${pass%%:*} pass ran ${n:-0} checks, expected at least ${pass##*:}; see $OUT/test.log"

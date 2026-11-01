@@ -8,6 +8,8 @@
 //   --connect PORT  Landlock: TCP connect to PORT allowed. No other TCP connects.
 //   --bind PORT     Landlock: TCP bind/listen on PORT allowed. No other TCP binds.
 //   --vsock         seccomp: allow AF_VSOCK sockets (the host bridge needs them, the agent doesn't).
+//   --nproc N       processes and threads the uid may have (RLIMIT_NPROC, default 512), so a runaway
+//                   agent can't exhaust the guest for init and the bridge, which run as other uids.
 //
 // Steps, each failing closed (exit 127):
 //   1. empty the capability bounding set and ambient set, drop to UID (1..65534), clear every
@@ -45,6 +47,7 @@
 #include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
+#include <sys/resource.h>
 
 // Namespace flags for clone(): CLONE_NEWTIME, NEWNS, NEWCGROUP, NEWUTS, NEWIPC, NEWUSER, NEWPID, NEWNET.
 #define NS_FLAGS 0x7E020080u
@@ -262,6 +265,7 @@ struct policy {
 	const char *rw[MAX_RULES];
 	long connect[MAX_RULES], bind[MAX_RULES];
 	int nrw, nconnect, nbind, vsock;
+	long nproc;
 };
 
 static int apply_landlock(const struct policy *p)
@@ -317,7 +321,7 @@ static int usage(void)
 
 int main(int argc, char **argv)
 {
-	struct policy p = { 0 };
+	struct policy p = { .nproc = 512 };
 	int i = 1;
 	for (; i < argc && strncmp(argv[i], "--", 2) == 0; i++) {
 		const char *o = argv[i];
@@ -335,6 +339,8 @@ int main(int argc, char **argv)
 			p.connect[p.nconnect++] = port;
 		} else if (strcmp(o, "--bind") == 0 && port > 0 && p.nbind < MAX_RULES) {
 			p.bind[p.nbind++] = port;
+		} else if (strcmp(o, "--nproc") == 0 && port > 0) {
+			p.nproc = port;
 		} else {
 			fprintf(stderr, "jail-exec: bad option %s %s\n", o, v);
 			return usage();
@@ -404,6 +410,11 @@ int main(int argc, char **argv)
 			fprintf(stderr, "jail-exec: capability %d still in the bounding set\n", c);
 			return 127;
 		}
+	}
+	struct rlimit nl = { (rlim_t)p.nproc, (rlim_t)p.nproc };
+	if (setrlimit(RLIMIT_NPROC, &nl)) {
+		perror("jail-exec: RLIMIT_NPROC");
+		return 127;
 	}
 	// 2.
 	if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) {

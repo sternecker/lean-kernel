@@ -27,6 +27,7 @@
 #include <sys/syscall.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
+#include <sys/resource.h>
 
 #ifndef AF_VSOCK
 #define AF_VSOCK 40
@@ -539,6 +540,11 @@ static void jailed_policy(void)
 	result(fd >= 0, "control: read /dev/urandom", fd >= 0 ? "ok" : strerror(errno));
 	if (fd >= 0)
 		close(fd);
+
+	struct rlimit nl;
+	int nok = getrlimit(RLIMIT_NPROC, &nl) == 0 && nl.rlim_cur == 512 && nl.rlim_max == 512;
+	snprintf(d, sizeof d, "%llu/%llu", (unsigned long long)nl.rlim_cur, (unsigned long long)nl.rlim_max);
+	result(nok, "RLIMIT_NPROC 512 (jail-exec default)", d);
 
 	// No capability in any set, bounding and ambient included.
 	FILE *f = fopen("/proc/self/status", "r");

@@ -130,7 +130,7 @@ make test
 Builds `tests/probe.c` and `guest/jail-exec.c` statically, puts them in a separate image
 (`out/rootfs-test.ext4`) whose init runs the probe and reboots, boots that headless with the same kernel
 command line as `make run`, and fails unless every check passes. Takes about 10 seconds after the build.
-Full console log: `out/test.log`. Expect `PROBE: root 96 / user 83 / jailed 29 passed, 0 failed` (vsock-only: `jailed 27`). Both passes start with checks that `/proc`, `/sys` and `/dev` are actually mounted, so a failed mount can't make the
+Full console log: `out/test.log`. Expect `PROBE: root 96 / user 83 / jailed 30 passed, 0 failed` (vsock-only: `jailed 28`). Both passes start with checks that `/proc`, `/sys` and `/dev` are actually mounted, so a failed mount can't make the
 "absent" checks pass. The vsock-only build gets `probe_profile=vsock` on its kernel command line and asserts that
 IPv4 is gone. To test that profile without touching `out/`, run `VSOCK_ONLY=1 LEAN_OUT=$PWD/out-vsock make config build test`.
 The root pass includes the image-ownership checks, `jail-exec` bad-UID refusals, and the boot sysctls (`kptr_restrict=2`, `memfd_noexec=2`, executable memfd refused). The jailed pass runs with the agent's policy shape (`--rw /tmp --connect 8080`). It checks the Landlock file and TCP rules against a world-writable directory, which only Landlock can refuse. It also checks that vsock and netlink sockets and an unlisted syscall are refused, and that inherited fds are closed.
@@ -361,6 +361,19 @@ Each run gets a fresh chroot under `/srv/lean-agent/firecracker/<id>/root`:
 `sudo lean-agent-jail --check` verifies the installation. After editing `scripts/lean-agent-jail`, run
 `sudo scripts/jail-setup.sh` again; `sudo scripts/jail-setup.sh uninstall` removes it all. Changes to the proxy
 take effect without reinstalling, because the wrapper copies `scripts/api-proxy.py` into the jail on every run.
+
+**What the guest can make the host do.** The guest controls how much work it sends the proxy, so the proxy
+bounds it. These are all set per session:
+- **Connections:** at most 16 at once (`--max-connections`). A connection over the limit is closed at once and
+  counted in the session summary.
+- **Idle connections:** one that sends nothing for 30 s is closed (`--idle-timeout`).
+- **The log:** every refused request is a line, so the log is rate-limited (a burst of 50, then 2 lines a second)
+  and capped at 5000 lines (`--max-log-lines`). Dropped lines are counted and reported.
+- **cgroup (jailed):** the proxy runs in its own, `lean-agent/<id>-proxy`, with 256 MiB of memory and 32 tasks
+  (`PROXY_MEM_MAX`, `PROXY_PIDS_MAX` in `/etc/lean-agent.conf`).
+
+Inside the guest, `jail-exec` caps the agent's uid at 512 processes and threads (`--nproc`, `RLIMIT_NPROC`), so a
+runaway agent can't starve init or the bridge, which run as other uids.
 
 **Proxy egress.** The wrapper resolves `api.anthropic.com` as root and passes the addresses to the proxy, which connects
 to them directly. It still verifies TLS for the name, so it needs no DNS. The nftables table `inet lean_agent`, created on

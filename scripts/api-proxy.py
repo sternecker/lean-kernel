@@ -195,13 +195,51 @@ TLS = ssl.create_default_context()
 LOG = sys.stderr
 
 
-def log(line):
-    LOG.write(time.strftime("%H:%M:%S ") + line + "\n")
+class LogLimit:
+    """The guest decides how often the proxy logs (every refused request is a line), so the log is
+    rate-limited (a burst of `burst`, then `rate` lines a second) and capped per session. Lines
+    dropped are counted and reported; the startup lines and the session summary always get through."""
+
+    def __init__(self, rate=2.0, burst=50, cap=5000):
+        self.rate, self.burst, self.cap = rate, burst, cap
+        self.tokens, self.last = float(burst), time.monotonic()
+        self.written = self.dropped = 0
+        self.lock = threading.Lock()
+
+    def admit(self):
+        with self.lock:
+            now = time.monotonic()
+            self.tokens = min(self.burst, self.tokens + (now - self.last) * self.rate)
+            self.last = now
+            if self.written >= self.cap or self.tokens < 1:
+                self.dropped += 1
+                return None
+            self.tokens -= 1
+            self.written += 1
+            dropped, self.dropped = self.dropped, 0
+            return dropped
+
+
+LOG_LIMIT = LogLimit()
+
+
+def log(line, always=False):
+    stamp = time.strftime("%H:%M:%S ")
+    if not always:
+        dropped = LOG_LIMIT.admit()
+        if dropped is None:
+            return
+        if dropped:
+            LOG.write(f"{stamp}({dropped} log lines dropped by the rate limit)\n")
+    LOG.write(stamp + line + "\n")
     LOG.flush()
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    # Idle limit on the guest side of a connection (socket timeout, set by StreamRequestHandler):
+    # a connection that sends nothing, or stops mid-request, is closed instead of holding a thread.
+    timeout = 30
     server_version = "lean-agent-proxy"
     sys_version = ""
 
@@ -313,7 +351,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    """One thread per connection, at most max_connections at a time: a connection over the limit is
+    closed at once, so the guest can't make the proxy hold an unbounded number of threads."""
     daemon_threads = True
+    max_connections = 16
+
+    def server_activate(self):
+        super().server_activate()
+        self.slots = threading.BoundedSemaphore(self.max_connections)
+        self.refused = 0
+
+    def process_request(self, request, client_address):
+        if not self.slots.acquire(blocking=False):
+            self.refused += 1
+            log(f"LIMIT connection closed: {self.max_connections} already open")
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
 
 
 def main():
@@ -329,11 +393,17 @@ def main():
     ap.add_argument("--max-output-tokens", type=int, default=1_000_000)
     ap.add_argument("--rpm", type=int, default=60)
     ap.add_argument("--models", default="")
+    ap.add_argument("--max-connections", type=int, default=16, help="concurrent guest connections (default 16)")
+    ap.add_argument("--idle-timeout", type=float, default=30, help="seconds a guest connection may sit idle (default 30)")
+    ap.add_argument("--max-log-lines", type=int, default=5000, help="log lines per session before the log stops (default 5000)")
     ap.add_argument("--upstream-addr", action="append", default=[],
                     help=f"IP address for {UPSTREAM} (repeatable); default: resolve the name")
     a = ap.parse_args()
     BUDGET = Budget(a.max_requests, a.max_input_tokens, a.max_output_tokens, a.rpm, a.models)
     ADDRS = a.upstream_addr
+    Server.max_connections = max(1, a.max_connections)
+    Handler.timeout = a.idle_timeout
+    LOG_LIMIT.cap = a.max_log_lines
 
     if a.token_file:
         st = os.stat(a.token_file)
@@ -357,18 +427,22 @@ def main():
     srv = Server(a.listen, Handler)
     os.umask(old)
     log(f"api-proxy: {a.listen} -> https://{UPSTREAM} (allow: "
-        + ", ".join(f"{m} {p}" for m, p in sorted(ALLOW)) + ")")
+        + ", ".join(f"{m} {p}" for m, p in sorted(ALLOW)) + ")", always=True)
     if ADDRS:
-        log(f"upstream: {UPSTREAM} pinned to {', '.join(ADDRS)} (no DNS)")
+        log(f"upstream: {UPSTREAM} pinned to {', '.join(ADDRS)} (no DNS)", always=True)
     log(f"budget: requests {a.max_requests or 'unlimited'}, input tokens {a.max_input_tokens or 'unlimited'}, "
-        f"output tokens {a.max_output_tokens or 'unlimited'}, {a.rpm or 'unlimited'}/min, models {a.models or 'any'}")
+        f"output tokens {a.max_output_tokens or 'unlimited'}, {a.rpm or 'unlimited'}/min, models {a.models or 'any'}", always=True)
+    log(f"limits: {Server.max_connections} connections, {a.idle_timeout:g}s idle timeout, "
+        f"{a.max_log_lines} log lines", always=True)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))  # run-agent.sh stops the proxy with TERM
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        log(BUDGET.summary())
+        dropped = LOG_LIMIT.dropped
+        log(BUDGET.summary() + f", {getattr(srv, 'refused', 0)} connections over the limit"
+            + (f", {dropped} log lines dropped" if dropped else ""), always=True)
         srv.server_close()
         try:
             os.unlink(a.listen)

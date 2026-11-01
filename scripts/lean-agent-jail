@@ -19,7 +19,8 @@
 #   /srv/lean-agent/firecracker/<id>/proxy  the proxy's directory, owned by lean-proxy
 #   Firecracker: uid lean-fc, chroot, its own empty network namespace (no route anywhere), cgroup
 #     limits (memory, pids, cpu) under /sys/fs/cgroup/lean-agent/<id>, fd limit, and its own seccomp
-#   proxy: uid lean-proxy, no groups, no capabilities, no_new_privs. The token arrives on a pipe.
+#   proxy: uid lean-proxy, no groups, no capabilities, no_new_privs, its own cgroup (memory, tasks),
+#     at most 16 guest connections, 30 s idle timeout, a rate-limited and capped log. The token arrives on a pipe.
 #     Egress: root resolves api.anthropic.com, hands the addresses to the proxy (which then needs no
 #     DNS), and nftables (table inet lean_agent) lets uid lean-proxy open TCP 443 to those addresses
 #     only; everything else it sends is rejected.
@@ -129,7 +130,8 @@ if [[ "${1:-}" == "--check" ]]; then
   if [[ "${CGROUPS:-1}" == 1 ]]; then
     [[ "$(stat -fc %T /sys/fs/cgroup)" == cgroup2fs ]] || die "cgroups v2 not mounted at /sys/fs/cgroup"
     for c in memory pids cpu; do grep -qw "$c" /sys/fs/cgroup/cgroup.subtree_control || die "cgroup controller $c not enabled at the root"; done
-    echo "cgroups:     v2, memory.max=$MEM_MAX pids.max=$PIDS_MAX cpu.max=$CPU_MAX"
+    echo "cgroups:     v2, Firecracker memory.max=$MEM_MAX pids.max=$PIDS_MAX cpu.max=$CPU_MAX;"
+    echo "             proxy memory.max=${PROXY_MEM_MAX:-$((256 * 1024 * 1024))} pids.max=${PROXY_PIDS_MAX:-32}"
   else
     echo "cgroups:     off (CGROUPS=0 in $CONF)"
   fi
@@ -176,6 +178,7 @@ cleanup() {
   fi
   ip netns del "$ns" 2>/dev/null || true
   [[ -d "/sys/fs/cgroup/$CG_PARENT/$id" ]] && rmdir "/sys/fs/cgroup/$CG_PARENT/$id" 2>/dev/null || true
+  [[ -d "/sys/fs/cgroup/$CG_PARENT/$id-proxy" ]] && rmdir "/sys/fs/cgroup/$CG_PARENT/$id-proxy" 2>/dev/null || true
   [[ "$run" == "$BASE/firecracker/agent-"* ]] && rm -rf -- "$run"
   exit "$rc"
 }
@@ -209,6 +212,17 @@ as_owner cat -- "$TOKEN_FILE" | setpriv --reuid=lean-proxy --regid=lean-proxy --
     python3 -I "$pdir/api-proxy.py" --listen "$pdir/p.sock" --token-fd 0 "${upstream_args[@]}" "${proxy_args[@]}" \
     2> >(as_owner sh -c 'cat >> "$1"' sh "$OUT/agent-proxy.log") &
 proxy=$!
+# The proxy in its own cgroup next to Firecracker's: memory and task limits on the host side of the
+# vsock, whatever the guest sends. Its own connection cap (16) keeps it well under the task limit.
+if [[ "${CGROUPS:-1}" == 1 ]]; then
+  mkdir -p "/sys/fs/cgroup/$CG_PARENT"
+  echo "+memory +pids +cpu" > "/sys/fs/cgroup/$CG_PARENT/cgroup.subtree_control"
+  pcg="/sys/fs/cgroup/$CG_PARENT/$id-proxy"
+  mkdir "$pcg"
+  echo "${PROXY_MEM_MAX:-$((256 * 1024 * 1024))}" > "$pcg/memory.max"
+  echo "${PROXY_PIDS_MAX:-32}" > "$pcg/pids.max"
+  echo "$proxy" > "$pcg/cgroup.procs" || die "could not move the proxy into $pcg"
+fi
 for _ in $(seq 50); do [[ -S "$pdir/p.sock" ]] && break; sleep 0.1; done
 [[ -S "$pdir/p.sock" ]] || die "api-proxy did not start; see $OUT/agent-proxy.log"
 # Firecracker turns a guest connection to vsock port 8080 into a connect to v.sock_8080 in the chroot.
