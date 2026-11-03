@@ -267,6 +267,7 @@ class UpstreamConnection(http.client.HTTPSConnection):
         raise err
 BUDGET = Budget(0, 0, 0, 0, "")
 TLS = ssl.create_default_context()
+TLS.minimum_version = ssl.TLSVersion.TLSv1_2
 LOG = sys.stderr
 
 
