@@ -56,6 +56,15 @@ if [ "$agent_exec" != 1 ]; then
     check "can't run a binary it wrote in $d" "$([ $rc = 126 ] && echo 1 || echo 0)" "exit $rc ${out##*: }"
   done
 fi
+# KNOWN GAP, asserted so it stays visible and honest: noexec and memfd_noexec stop the agent running a
+# binary it wrote to a file or a memfd, but NOT native code it JITs into anonymous memory. jail-exec
+# allows mmap/mprotect with any prot (it must: Claude Code is a Bun/JSC JIT), and no kernel option
+# enforces userspace W^X, so an in-process JIT (bun:ffi TinyCC, JSC, ctypes, ...) can run agent-written
+# code. jit-probe returns 0 when that works. We record 0 as the expected state; the day it flips to 1
+# the policy changed and this line (and the docs) must be revisited.
+jit-probe >/dev/null 2>&1; jrc=$?
+check "in-process JIT works (W^X NOT enforced; known, see HOWTO 9.5)" "$([ $jrc = 0 ] && echo 1 || echo 0)" \
+  "jit-probe exit $jrc ($([ $jrc = 0 ] && echo 'anonymous PROT_EXEC allowed' || echo 'blocked/inconclusive -- policy changed, revisit docs'))"
 
 # TCP: Landlock allows connect to 8080 only.
 out="$( { exec 3<>/dev/tcp/127.0.0.1/9; } 2>&1)"

@@ -114,6 +114,16 @@ control-flow integrity on indirect calls, kCFI by default via `CFI_AUTO_DEFAULT=
 
 ## 5. Honest limits
 
+No claim is made that any of this is complete or correct. It is hand-built defense in depth; it has bugs
+and gaps, some listed here and asserted by `make agent-test`, others not yet found. The checks keep the
+posture visible, they don't certify it.
+
+- In-process JIT defeats `noexec`/`memfd_noexec`: the agent can `mmap`/`mprotect` anonymous memory
+  executable and run native code it generated at runtime, so the "can't run a binary it wrote" protection
+  covers only file- and memfd-based exec. It can't be closed at the seccomp layer, because Claude Code is
+  a Bun/JavaScriptCore JIT and needs anonymous executable memory to run JavaScript at all; closing it means
+  a different mechanism and a no-JIT runtime. `guest/jit-probe.c` + `make agent-test` assert it stays known.
+  The practical impact is kernel-syscall surface, not a new host-boundary privilege (see HOWTO §9.5).
 - Host-side bugs: virtio device emulation in Firecracker, KVM itself. The jailer (step 9.2 in HOWTO)
   bounds the VMM; nothing in this repo bounds KVM.
 - A separate kernel is still a kernel. It will have bugs. The win is that it has far fewer of them

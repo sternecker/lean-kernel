@@ -14,6 +14,8 @@ The point: an agent that processes attacker-controlled content should not share 
 
 ```
 VERSION                  pinned kernel, Firecracker, and base-config versions
+LICENSE                  Apache-2.0 (this project's own source)
+THIRD-PARTY.md           licenses of the components the build fetches and the image bundles
 HOWTO.md                 the procedure; NOTES.md the reasoning
 configs/
   base-firecracker-x86_64-6.18.config   Firecracker's reference microvm config (upstream, unmodified)
@@ -40,9 +42,11 @@ scripts/
   api-proxy.py           host-side API proxy: holds the credential, allowlists paths and request bodies, budgets
   lean-agent-jail        root wrapper: Firecracker under the jailer (uid per run), the proxy as lean-proxy
   jail-setup.sh          one-time sudo install of the wrapper, users, sudoers rule and config
+  sbom.sh                SPDX + CycloneDX SBOM of the agent image with syft (make sbom)
 tests/probe.c            in-guest probe: tries every cut as root, as a user, and under jail-exec
 tests/console-filter-test.py  console-filter.py cases, split-read and fuzz checks
 guest/jail-exec.c        in-guest launcher: drop to the agent uid, no_new_privs, Landlock, seccomp allowlist, exec
+guest/jit-probe.c        posture probe: records that in-process JIT (anonymous PROT_EXEC) is allowed
 guest/agent-selftest.sh  the agent VM's hardening, checked from inside it (make agent-test)
 vm/vm.json.in            Firecracker config template
 docs/                    architecture diagrams (target design; as built: HOWTO §9.5)
@@ -69,6 +73,7 @@ make run       # boots in Firecracker; ctrl-a x does nothing here, use `reboot -
 make agent-rootfs  # read-only image with Claude Code, bash, socat, jail-exec (root-owned, via fakeroot)
 make agent     # Claude Code in the VM; credential stays in a host proxy (HOWTO §9.5); needs the jail (§9.2) or JAIL=0
 make agent-test   # the agent VM's hardening, checked from inside it (no Claude Code, no tokens)
+make sbom      # SPDX + CycloneDX SBOM of the agent image (needs syft; run after agent-rootfs)
 ```
 
 `make config` is the step that matters. `merge_config.sh` silently lets Kconfig dependencies override a fragment line; `configure.sh` re-reads the fragment afterwards and refuses to continue if any `=y` didn't take or any `is not set` came back as built-in. A cut that didn't happen is a false sense of security.
@@ -81,6 +86,8 @@ Modules (none; everything built in, no LKM rootkits), io_uring, user namespaces,
 
 Assume the agent is compromised (prompt injection is enough) and acting against you.
 
+No claim is made that the jails are complete or correct. This is defense in depth built and reasoned about by hand; it has bugs and gaps, some known and listed below, others surely not yet found. The known-gap entries and the `make agent-test` assertions exist to keep the real posture visible, not to certify it. Read the code, run the checks, and decide for your own threat model; do not treat any layer here as a guarantee.
+
 - Defends:
   - Reaching kernel code that isn't there, and exploit mitigations against the code that is. Inside the VM the agent is also unprivileged, under Landlock and a seccomp allowlist, on a read-only root with `noexec` writable mounts: a guest kernel bug comes before any VMM escape.
   - Credential theft: the token lives only in the host proxy; the guest holds a placeholder.
@@ -91,6 +98,7 @@ Assume the agent is compromised (prompt injection is enough) and acting against 
   - Bugs in the virtio devices or KVM itself, or the host kernel's own LPE surface. Patch the host on its distro cadence.
   - The API itself as a channel: what the agent reads can still go to Anthropic as prompt content. The proxy stops it reaching anyone else through the API.
   - Misuse of the credential through allowed calls: budgets bound it, they don't prevent it.
+  - Native code the agent generates at runtime: `noexec` and `vm.memfd_noexec=2` stop it running a binary it wrote to a file or a memfd, but not code it JITs into anonymous memory (`mmap`/`mprotect` with `PROT_EXEC` are allowed — Claude Code is itself a JIT — and nothing enforces userspace W^X). This grants nothing new at the host boundary (the agent already runs as its own uid under the same seccomp set), but it does hand native code a freer run at the guest kernel's syscall surface. `make agent-test` asserts this as a known gap; see HOWTO §9.5.
   - Interactive mode's serial console in full: `scripts/console-filter.py` drops the escape sequences that reach past the screen (OSC 52 clipboard, hyperlinks, title reports, DCS/APC strings, window moves), but cursor, colour and mode sequences pass, so the guest can still draw anything on your screen, a fake host prompt included (headless output has all control characters stripped).
 - Not a general-purpose kernel. Every option kept "in case" is a bug you chose to carry.
 

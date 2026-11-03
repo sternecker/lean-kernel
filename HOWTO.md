@@ -10,7 +10,13 @@ Working on the development host:
   `make test` in both profiles, the default (`out/`) and vsock-only (`out-vsock/`); `scripts/all.sh --vsock`
   runs every step for both.
 - The agent VM (9.5) runs Claude Code jailed: Firecracker under the jailer with a uid per run, the API proxy as
-  `lean-proxy`, the credential outside the VM. `make agent-test` passes 31 checks.
+  `lean-proxy`, the credential outside the VM. `make agent-test` passes 32 checks (one of them records a known gap: in-process JIT works).
+
+A caution before any of it: the author does not claim the jails are completely secure or free of errors. This is
+hand-built defense in depth, with known gaps (listed where they occur, e.g. the serial console in 9.5 and the
+in-process JIT note there) and, certainly, unknown ones. The `make agent-test` checks and the known-gap notes keep
+the real posture visible; they do not certify it. Treat nothing here as a guarantee — read the code and judge it
+against your own threat model.
 
 On a fresh clone, start at section 1. `make deps` fetches and verifies Firecracker; `make fetch` the kernel.
 
@@ -161,8 +167,10 @@ reach without `jail-exec`:
 - `perf_event_open`: x86 forces `PERF_EVENTS` on, and upstream's strictest `perf_event_paranoid` (2)
   still allows self-profiling. `jail-exec` blocks it.
 - `vmsplice`, `process_vm_readv`, `name_to_handle_at`: blocked by `jail-exec`.
-- `setxattr` (user.*), `memfd_create`, `memfd_secret`: allowed. Runtimes use them; revisit with an
-  allowlist once the agent's syscall set is known.
+- `setxattr` (user.*): allowed under `jail-exec`; runtimes use it.
+- `memfd_create`, `memfd_secret`: **not** in the `jail-exec` allowlist, so they return `ENOSYS` to the
+  agent (an earlier version of this note said they were allowed; the code never added them). They are
+  reachable by root before the drop; the agent does not get them.
 - `AF_INET` is available in the default profile and unavailable with `VSOCK_ONLY=1`.
 
 Run it after every `make build`. A new FAIL means a cut stopped holding: read the line, then check
@@ -339,9 +347,27 @@ The headless task and `TOOLS` arrive on a separate read-only drive written fresh
 so a kept home can't replay an old task.
 Runs can overlap: each works in its own `out/runs/<id>/` (VM config, socket, scratch drive, `agent.log`,
 `agent-proxy.log`), `out/agent.log` and `out/agent-proxy.log` point at the newest run, and the newest 20 are kept.
-`/tmp` and `/home/agent` are mounted `noexec`. With `vm.memfd_noexec=2` and no interpreter in the image that
-loads native code, the agent can't run a binary it wrote, which is what most kernel exploits need. `AGENT_EXEC=1 make agent`
-lifts this for workloads that build and run code. The protection weakens once the image gains Python, Node or a compiler.
+`/tmp` and `/home/agent` are mounted `noexec`, and `vm.memfd_noexec=2` blocks the `memfd_create`+`execveat`
+trick, so the agent can't run a binary it wrote **to a file or a memfd**. `AGENT_EXEC=1 make agent` lifts the
+`noexec` mounts for workloads that build and run code.
+
+This does **not** stop the agent running native code it generates in anonymous memory at runtime, i.e. an
+in-process JIT: `mmap`/`mprotect` with `PROT_EXEC` are allowed (they have to be — Claude Code is a Bun
+executable and JavaScriptCore JITs JavaScript into executable memory to run at all), and no kernel option
+enforces userspace W^X. So `bun:ffi`'s TinyCC `cc()`, JSC itself, Python `ctypes`, V8 or LuaJIT could each
+execute runtime-generated native code, bypassing `noexec`/`memfd_noexec` entirely. The image already ships
+one such engine (Bun/JSC); adding Python, Node or a compiler widens it further, not opens it. `make agent-test`
+asserts this state explicitly (the "in-process JIT works" line) so the gap stays visible rather than assumed
+closed; `guest/jit-probe.c` is the probe. Closing it is not a seccomp tweak — it would mean a different
+mechanism and running the runtime without its JIT; see the note on limits below.
+
+What in-process native code does and does not buy an attacker: the agent already runs arbitrary logic as its
+own uid, so this is not a new privilege at the host boundary — the syscall set is seccomp-limited whether the
+code is JS or native, Landlock still gates the filesystem, and egress is still only the proxy. It matters
+because native code can defeat any in-runtime (JS-level) restriction and has a freer hand to probe the guest
+kernel's syscall surface for a privilege-escalation or VM-escape bug. The VM boundary, not the inability to
+run native code, is the backstop here.
+
 VM memory is 2 GB. This needs the default kernel profile, because `VSOCK_ONLY=1` also removes loopback TCP.
 
 **Checking the agent VM: `make agent-test`.** It boots the real agent image, but doesn't start Claude Code, and nothing it
@@ -352,6 +378,7 @@ sends is forwarded upstream, so it spends no tokens.
   - no capabilities and only its own processes visible;
   - `/dev/kmsg` refused;
   - no exec of a binary it wrote;
+  - in-process JIT works (W^X is not enforced) — asserted as a known gap, not a pass to be proud of;
   - no TCP connect except to port 8080;
   - the proxy refusing an off-allowlist path, `web_fetch`, `mcp_servers`, a non-JSON body, URL image and document
     sources (one inside a tool result), an unknown top-level field and a malformed `Content-Length`.

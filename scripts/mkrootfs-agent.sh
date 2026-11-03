@@ -52,6 +52,9 @@ grep -q "^# CONFIG_INET is not set" "$OUT/.config" 2>/dev/null \
 
 mkdir -p "$OUT"
 gcc -static -O2 -Wall -Wextra -Werror -o "$OUT/jail-exec" "$ROOT/guest/jail-exec.c"
+# A posture probe for agent-selftest: whether the agent can make anonymous memory executable (in-process
+# JIT, which noexec and memfd_noexec do not cover). Built like jail-exec; placed on the read-only root.
+gcc -static -O2 -Wall -Wextra -Werror -o "$OUT/jit-probe" "$ROOT/guest/jit-probe.c"
 
 stage="$WORK/rootfs-agent-stage"
 rm -rf "$stage"
@@ -67,6 +70,7 @@ cp "$bash_bin" "$stage/bin/bash";        copy_libs "$bash_bin"
 cp "$socat_bin" "$stage/usr/bin/socat";  copy_libs "$socat_bin"
 cp "$claude_bin" "$stage/usr/local/bin/claude"; copy_libs "$claude_bin"
 cp "$OUT/jail-exec" "$stage/bin/jail-exec"
+cp "$OUT/jit-probe" "$stage/bin/jit-probe"
 cp "$ROOT/guest/agent-selftest.sh" "$stage/bin/agent-selftest"
 if [[ "${STRACE:-0}" == "1" ]]; then
   strace_bin="$(command -v strace)" || die "STRACE=1 but strace is not installed"

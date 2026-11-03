@@ -1,7 +1,7 @@
 # lean-kernel: minimal hardened Firecracker guest kernel.
 # Every target is a thin wrapper over scripts/; run the script directly for options.
 
-.PHONY: all deps fetch config build check syscalls rootfs run test agent-rootfs agent agent-test clean distclean
+.PHONY: all deps fetch config build check syscalls rootfs run test agent-rootfs agent agent-test sbom clean distclean
 
 # Every step that needs no input and spends no tokens, in order; see scripts/all.sh (--vsock, --no-agent).
 all:
@@ -44,6 +44,10 @@ agent:
 # The agent VM's hardening, from inside the real agent image; no Claude Code, no tokens.
 agent-test:
 	@AGENT_SELFTEST=1 scripts/run-agent.sh
+
+# SPDX + CycloneDX SBOM of the agent image (needs syft); see scripts/sbom.sh. Run after agent-rootfs.
+sbom:
+	@scripts/sbom.sh
 
 clean:
 	rm -rf out
