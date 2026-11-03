@@ -317,8 +317,13 @@ string would be a way out. The checks are allowlists: top-level fields (`ALLOW_F
 (`ALLOW_SOURCES`: base64, text, content). A field the API adds later is refused, with its name in the DENY line,
 until it's read and added. Claude Code's WebSearch tool is therefore unavailable in the VM. Log lines escape control
 characters, and what headless `make agent` prints from the guest and the log has them stripped, so the guest
-can't send escape sequences to your terminal. Interactive mode is the exception: the serial console reaches your
-terminal raw, because filtering it would break Claude Code's full-screen interface.
+can't send escape sequences to your terminal. Interactive mode can't strip them all without breaking Claude Code's
+full-screen interface, so the serial console goes through `scripts/console-filter.py`, which parses it as a terminal
+would and re-emits only allowlisted sequences: text, CSI (cursor, colours, modes, mouse and keyboard protocols),
+titles and colour queries. It drops OSC 52 (clipboard write and read), every other OSC (hyperlinks, notifications,
+colour changes), DCS/APC/PM strings, title reports and window moves, C1 controls and bidi characters. At exit it
+resets the terminal modes the guest may have left on and discards late terminal replies before your shell can read
+them. The guest still controls what's on screen while it runs. Tests: `python3 -I tests/console-filter-test.py`.
 Each session (one proxy process) also has a budget: 500 requests, 50M input tokens (cache reads included), 1M output
 tokens and 60 requests a minute, with an optional model allowlist. Change them with `AGENT_MAX_REQUESTS`,
 `AGENT_MAX_INPUT_TOKENS`, `AGENT_MAX_OUTPUT_TOKENS`, `AGENT_RPM` and `AGENT_MODELS='claude-sonnet-*'` (0 = unlimited).

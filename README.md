@@ -36,10 +36,12 @@ scripts/
   net-tap.sh             optional host tap for guest networking (needs sudo)
   mkrootfs-agent.sh      the agent image: pinned Claude Code, bash, socat, jail-exec, and the guest init
   run-agent.sh           boot the agent VM (interactive, headless or self-test), one out/runs/<id>/ per run
+  console-filter.py      interactive console: passes the sequences the TUI needs, drops clipboard/OSC/DCS and the rest
   api-proxy.py           host-side API proxy: holds the credential, allowlists paths and request bodies, budgets
   lean-agent-jail        root wrapper: Firecracker under the jailer (uid per run), the proxy as lean-proxy
   jail-setup.sh          one-time sudo install of the wrapper, users, sudoers rule and config
 tests/probe.c            in-guest probe: tries every cut as root, as a user, and under jail-exec
+tests/console-filter-test.py  console-filter.py cases, split-read and fuzz checks
 guest/jail-exec.c        in-guest launcher: drop to the agent uid, no_new_privs, Landlock, seccomp allowlist, exec
 guest/agent-selftest.sh  the agent VM's hardening, checked from inside it (make agent-test)
 vm/vm.json.in            Firecracker config template
@@ -89,7 +91,7 @@ Assume the agent is compromised (prompt injection is enough) and acting against 
   - Bugs in the virtio devices or KVM itself, or the host kernel's own LPE surface. Patch the host on its distro cadence.
   - The API itself as a channel: what the agent reads can still go to Anthropic as prompt content. The proxy stops it reaching anyone else through the API.
   - Misuse of the credential through allowed calls: budgets bound it, they don't prevent it.
-  - Interactive mode's serial console, which reaches your terminal unfiltered (headless output is sanitized).
+  - Interactive mode's serial console in full: `scripts/console-filter.py` drops the escape sequences that reach past the screen (OSC 52 clipboard, hyperlinks, title reports, DCS/APC strings, window moves), but cursor, colour and mode sequences pass, so the guest can still draw anything on your screen, a fake host prompt included (headless output has all control characters stripped).
 - Not a general-purpose kernel. Every option kept "in case" is a bug you chose to carry.
 
 ## Cadence (the real cost)

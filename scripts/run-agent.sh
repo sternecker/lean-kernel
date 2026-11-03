@@ -65,7 +65,12 @@ cleanup_tty=""
 # the home (KEEP_SCRATCH=1, while this run still holds the lock) or discard it. Logs stay in $RUN.
 finish() {
   local rc=$?
-  [[ -n "$cleanup_tty" ]] && stty "$cleanup_tty"
+  if [[ -n "$cleanup_tty" ]]; then
+    stty "$cleanup_tty"
+    # Discard terminal replies to the guest's last queries that arrive after the VM is gone, so the
+    # host shell doesn't read them as typed input.
+    python3 -I -c 'import termios, time; time.sleep(0.3); termios.tcflush(0, termios.TCIFLUSH)' || true
+  fi
   [[ -n "$proxy" ]] && { kill "$proxy" 2>/dev/null; wait "$proxy" 2>/dev/null || true; }
   rm -f -- "$vsock" "${vsock}_8080"
   if [[ -s "$scratch" && "$keep" == 1 && -n "${have_lock:-}" ]]; then
@@ -224,5 +229,8 @@ else
     cleanup_tty="$(stty -g)"
     stty raw -echo
   fi
-  "${launch[@]}"
+  # The serial console goes through scripts/console-filter.py: escape sequences Claude Code's interface
+  # needs pass, and the ones that reach past the screen (OSC 52 clipboard write/read, hyperlinks,
+  # title reports, DCS/APC strings, window moves) are dropped. Keystrokes go to the guest unfiltered.
+  "${launch[@]}" | python3 -I "$ROOT/scripts/console-filter.py"
 fi
