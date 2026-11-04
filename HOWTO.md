@@ -6,7 +6,7 @@ and the optional tap device. Commands assume you are in the repo root.
 ## 0. Where things stand (2026-11-01)
 
 Working on the development host:
-- The kernel (`linux-6.18.58`, pinned and sha256-verified) configures, builds and passes `make check` and
+- The kernel (`linux-6.18.60`, pinned and sha256-verified) configures, builds and passes `make check` and
   `make test` in both profiles, the default (`out/`) and vsock-only (`out-vsock/`); `scripts/all.sh --vsock`
   runs every step for both.
 - The agent VM (9.5) runs Claude Code jailed: Firecracker under the jailer with a uid per run, the API proxy as
@@ -54,7 +54,7 @@ config: <repo>/out/.config
 
 - `warn ... not present in final config`: the option name doesn't exist in 6.18 (renamed or removed),
   or a dependency is off so Kconfig hides it. With `VSOCK_ONLY=1`, expect this for `CIFS`, `NFS_FS`,
-  `NFSD` and `SMB_SERVER`, which depend on `INET`. Harmless for an `is not set` line; look it up in `work/linux-6.18.58/` with
+  `NFSD` and `SMB_SERVER`, which depend on `INET`. Harmless for an `is not set` line; look it up in `work/linux-6.18.60/` with
   `grep -rn "config NAME" --include=Kconfig*` and fix the fragment so the warning goes away.
 - `FAIL ... wanted off, final config has =y`: a dependency turned the option back on. Find what selects it
   (`make O=out menuconfig`, then `/` search, shows "Selected by"). Either cut the selector too or
@@ -105,7 +105,7 @@ Firecracker starts with `vm/vm.json` (2 vCPUs, 512 MB, vsock CID 3, no network),
 terminal. The init script prints the first test:
 
 ```
-lean-kernel guest: 6.18.58
+lean-kernel guest: 6.18.60
 modules dir present? no
 io_uring: absent
 user ns:  absent

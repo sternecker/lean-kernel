@@ -20,7 +20,7 @@ licenses impose no obligation on the lean-kernel source as committed.
 
 | Component | Version | Upstream | License |
 |-----------|---------|----------|---------|
-| Linux kernel | 6.18.58 | https://www.kernel.org/ | GPL-2.0 WITH Linux-syscall-note |
+| Linux kernel | 6.18.60 | https://www.kernel.org/ | GPL-2.0 WITH Linux-syscall-note |
 | Firecracker + jailer | v1.17.0 | https://github.com/firecracker-microvm/firecracker | Apache-2.0 |
 | kernel-hardening-checker | pinned to `KHC_COMMIT` in `VERSION` (b2acfd4) | https://github.com/a13xp0p0v/kernel-hardening-checker | GPL-3.0 |
 

@@ -19,9 +19,11 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Install build dependencies
+        # Acquire::Retries=0: CVE-2026-109518 (APT RCE via hard-link reuse) needs retries > 0, and the
+        # debian:trixie image may still carry apt < 3.0.4. Drop it once the image ships the fix.
         run: |
-          apt-get update -q
-          apt-get install -y -q --no-install-recommends \
+          apt-get -o Acquire::Retries=0 update -q
+          apt-get -o Acquire::Retries=0 install -y -q --no-install-recommends \
             make gcc flex bison bc dwarves cpio curl ca-certificates xz-utils git python3 \
             e2fsprogs libelf-dev libssl-dev clang-22 lld-22 llvm-22
       - uses: actions/checkout@v4
