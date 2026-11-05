@@ -189,9 +189,115 @@ def write_all(fd, data):
         data = data[os.write(fd, data):]
 
 
+# --- seccomp: begin (kept identical in scripts/api-proxy.py and scripts/console-filter.py; ---
+# --- tests/seccomp-test.py checks that) ---
+# A host process that parses guest-controlled bytes gets a seccomp filter once it has set itself up. It
+# is a denylist that answers EPERM, not an allowlist that kills: CPython with threads and TLS uses
+# syscalls nobody wants to enumerate, and a miss must not take the console or the proxy down mid-run.
+# What it removes is the kernel surface a compromised process would reach for next: exec, debugging other
+# processes, namespaces and mounts, bpf, io_uring, userfaultfd, perf, keyrings, modules, kexec, terminal
+# input injection (TIOCSTI). x86_64
+# only, like the rest of the repo (Firecracker's release binaries are x86_64); anything else refuses to
+# start rather than run unfiltered. Standard library only (ctypes): the scripts run under python3 -I.
+SECCOMP_DENY_COMMON = {
+    "execve": 59, "execveat": 322, "ptrace": 101, "process_vm_readv": 310, "process_vm_writev": 311,
+    "process_madvise": 440, "pidfd_getfd": 438, "personality": 135,
+    "unshare": 272, "setns": 308, "mount": 165, "umount2": 166, "pivot_root": 155, "chroot": 161,
+    "fsopen": 430, "fsconfig": 431, "fsmount": 432, "fspick": 433, "move_mount": 429, "open_tree": 428,
+    "open_tree_attr": 467, "mount_setattr": 442,
+    "bpf": 321, "perf_event_open": 298, "userfaultfd": 323,
+    "io_uring_setup": 425, "io_uring_enter": 426, "io_uring_register": 427,
+    "keyctl": 250, "add_key": 248, "request_key": 249,
+    "init_module": 175, "finit_module": 313, "delete_module": 176, "kexec_load": 246, "kexec_file_load": 320,
+    "open_by_handle_at": 304, "name_to_handle_at": 303, "swapon": 167, "swapoff": 168, "reboot": 169,
+    "acct": 163, "quotactl": 179,
+}
+_NR_CLONE, _NR_CLONE3, _NR_SOCKET, _NR_IOCTL = 56, 435, 41, 16
+# ioctls that act on another process's input: TIOCSTI pushes bytes into a terminal's input queue (the
+# console filter's stdout is the user's terminal, so that would type commands into their shell), and
+# TIOCLINUX can do the same on a virtual console. Refused even where dev.tty.legacy_tiocsti=0.
+_IOCTL_DENY = (0x5412, 0x541C)   # TIOCSTI, TIOCLINUX
+# CLONE_NEWNS | NEWCGROUP | NEWUTS | NEWIPC | NEWUSER | NEWPID | NEWNET
+_CLONE_NS = 0x00020000 | 0x02000000 | 0x04000000 | 0x08000000 | 0x10000000 | 0x20000000 | 0x40000000
+
+
+def install_seccomp(extra_deny=(), socket_families=None, threads=True):
+    """Load the filter into this process (all its threads). extra_deny: more syscall numbers to refuse.
+    socket_families: the address families socket() may create (an empty tuple refuses socket() outright;
+    None leaves it alone). threads=False refuses clone() too; otherwise clone() may make threads but no
+    namespaces. clone3() answers ENOSYS, so glibc falls back to clone(), whose flags a filter can read.
+    Raises OSError if the filter could not be loaded: callers stop rather than run without it."""
+    import ctypes
+    import struct
+
+    if os.uname().machine != "x86_64":
+        raise OSError(f"seccomp filter: x86_64 only, not {os.uname().machine}")
+    LD, JEQ, JGE, JSET, RET = 0x20, 0x15, 0x35, 0x45, 0x06   # BPF_LD|W|ABS, BPF_JMP|{JEQ,JGE,JSET}|K, BPF_RET|K
+    KILL, ALLOW = 0x80000000, 0x7FFF0000                      # SECCOMP_RET_KILL_PROCESS, SECCOMP_RET_ALLOW
+    EPERM, ENOSYS = 0x00050000 | 1, 0x00050000 | 38           # SECCOMP_RET_ERRNO | errno
+    prog = [
+        (LD, 0, 0, 4), (JEQ, 1, 0, 0xC000003E), (RET, 0, 0, KILL),   # arch must be AUDIT_ARCH_X86_64
+        (LD, 0, 0, 0), (JGE, 0, 1, 0x40000000), (RET, 0, 0, KILL),   # no x32 numbers past the denylist
+    ]
+    for nr in sorted(set(SECCOMP_DENY_COMMON.values()) | set(extra_deny)):
+        prog += [(JEQ, 0, 1, nr), (RET, 0, 0, EPERM)]
+    prog += [(JEQ, 0, 1, _NR_CLONE3), (RET, 0, 0, ENOSYS)]
+    # ioctl: args[1] low word (offset 24) is the request
+    prog += [(JEQ, 0, len(_IOCTL_DENY) + 3, _NR_IOCTL), (LD, 0, 0, 24)]
+    prog += [(JEQ, len(_IOCTL_DENY) - i, 0, c) for i, c in enumerate(_IOCTL_DENY)]
+    prog += [(RET, 0, 0, ALLOW), (RET, 0, 0, EPERM)]
+    if threads:   # args[0] low word (offset 16): the flags
+        prog += [(JEQ, 0, 4, _NR_CLONE), (LD, 0, 0, 16), (JSET, 0, 1, _CLONE_NS), (RET, 0, 0, EPERM), (RET, 0, 0, ALLOW)]
+    else:
+        prog += [(JEQ, 0, 1, _NR_CLONE), (RET, 0, 0, EPERM)]
+    if socket_families is not None:
+        fams = list(socket_families)
+        prog += [(JEQ, 0, len(fams) + 3, _NR_SOCKET), (LD, 0, 0, 16)]
+        prog += [(JEQ, len(fams) - i, 0, f) for i, f in enumerate(fams)]
+        prog += [(RET, 0, 0, EPERM), (RET, 0, 0, ALLOW)]
+    prog.append((RET, 0, 0, ALLOW))
+
+    buf = ctypes.create_string_buffer(b"".join(struct.pack("<HBBI", *i) for i in prog))
+
+    class SockFprog(ctypes.Structure):
+        _fields_ = [("len", ctypes.c_ushort), ("filter", ctypes.c_void_p)]
+
+    fprog = SockFprog(len(prog), ctypes.addressof(buf))
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.syscall.restype = ctypes.c_long
+    libc.prctl.restype = ctypes.c_int
+    # PR_SET_NO_NEW_PRIVS: required to load a filter without CAP_SYS_ADMIN, and nothing here needs privs.
+    if libc.prctl(38, ctypes.c_ulong(1), ctypes.c_ulong(0), ctypes.c_ulong(0), ctypes.c_ulong(0)) != 0:
+        raise OSError(ctypes.get_errno(), "prctl(PR_SET_NO_NEW_PRIVS)")
+    # seccomp(SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_TSYNC, &prog): every thread, or none.
+    rc = libc.syscall(ctypes.c_long(317), ctypes.c_long(1), ctypes.c_long(1), ctypes.byref(fprog))
+    if rc != 0:
+        raise OSError(ctypes.get_errno(), f"seccomp(SECCOMP_SET_MODE_FILTER) returned {rc}")
+# --- seccomp: end ---
+
+
+# Beyond the common list: the console filter only reads fd 0 and writes fd 1, so once it is running it
+# needs no new files, no sockets and no processes. It runs as the user, so this keeps a compromised filter
+# from creating or changing any of the user's files.
+CONSOLE_DENY = (
+    2, 257, 437, 85,            # open, openat, openat2, creat
+    87, 263, 82, 264, 316,      # unlink, unlinkat, rename, renameat, renameat2
+    86, 265, 88, 266, 76,       # link, linkat, symlink, symlinkat, truncate
+    90, 268, 452, 92, 94, 260,  # chmod, fchmodat, fchmodat2, chown, lchown, fchownat
+    133, 259, 83, 258, 84,      # mknod, mknodat, mkdir, mkdirat, rmdir
+    188, 189, 197, 198, 463, 466,  # setxattr, lsetxattr, removexattr, lremovexattr, setxattrat, removexattrat
+    280, 235, 132, 261,         # utimensat, utimes, utime, futimesat
+    319, 57, 58,                # memfd_create, fork, vfork
+)
+
+
 def main():
     f = Filter()
     dec = codecs.getincrementaldecoder("utf-8")("replace")
+    try:
+        install_seccomp(CONSOLE_DENY, socket_families=(), threads=False)
+    except OSError as e:
+        sys.exit(f"console-filter: {e}; not running without the seccomp filter")
     try:
         while True:
             chunk = os.read(0, 65536)

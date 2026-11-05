@@ -39,12 +39,14 @@ scripts/
   mkrootfs-agent.sh      the agent image: pinned Claude Code, bash, socat, jail-exec, and the guest init
   run-agent.sh           boot the agent VM (interactive, headless or self-test), one out/runs/<id>/ per run
   console-filter.py      interactive console: passes the sequences the TUI needs, drops clipboard/OSC/DCS and the rest
-  api-proxy.py           host-side API proxy: holds the credential, allowlists paths and request bodies, budgets
+  api-proxy.py           host-side API proxy: holds the credential, allowlists paths/headers/bodies, denylists dangerous betas, budgets
   lean-agent-jail        root wrapper: Firecracker under the jailer (uid per run), the proxy as lean-proxy
   jail-setup.sh          one-time sudo install of the wrapper, users, sudoers rule and config
   sbom.sh                SPDX + CycloneDX SBOM of the agent image with syft (make sbom)
 tests/probe.c            in-guest probe: tries every cut as root, as a user, and under jail-exec
 tests/console-filter-test.py  console-filter.py cases, split-read and fuzz checks
+tests/api-proxy-test.py  api-proxy.py header, beta and body policy cases
+tests/seccomp-test.py    the seccomp filter in api-proxy.py and console-filter.py
 guest/jail-exec.c        in-guest launcher: drop to the agent uid, no_new_privs, Landlock, seccomp allowlist, exec
 guest/jit-probe.c        posture probe: records that in-process JIT (anonymous PROT_EXEC) is allowed
 guest/agent-selftest.sh  the agent VM's hardening, checked from inside it (make agent-test)

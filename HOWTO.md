@@ -320,10 +320,25 @@ The guest holds only a placeholder token. The proxy swaps in the real one, forwa
 and `/v1/messages/count_tokens`, and logs one line per request to `out/agent-proxy.log`. It also rejects any
 request that asks Anthropic's servers to reach out for the agent: server tools (`web_fetch`, `web_search`, code
 execution), `mcp_servers`, and content blocks whose `source` is a URL or an uploaded file (an image or PDF "by URL"
-is fetched server-side), anywhere in the messages, tool results included. Otherwise a URL with data in its query
-string would be a way out. The checks are allowlists: top-level fields (`ALLOW_FIELDS`) and source types
-(`ALLOW_SOURCES`: base64, text, content). A field the API adds later is refused, with its name in the DENY line,
-until it's read and added. Claude Code's WebSearch tool is therefore unavailable in the VM. Log lines escape control
+is fetched server-side), anywhere in the messages, tool results included. That includes tools added
+mid-conversation (`tool_definition` blocks). Otherwise a URL with data in its query string would be a way out. The
+body checks are allowlists: top-level fields (`ALLOW_FIELDS`), source types (`ALLOW_SOURCES`: base64, text,
+content), the query string (none, or `beta=true`), and request headers (`FORWARD_HEADERS`; the rest dropped),
+with `anthropic-version` pinned. A field the API adds later is refused, with its name in the DENY line, until
+it's read and added. `anthropic-beta` is instead a **denylist** (`DENY_BETA_PREFIXES`): any beta is forwarded
+except the server-reaching, server-state and costly families, matched by name stem (ignoring case) so a date bump stays refused.
+A beta only changes what a request *field* means, and the body allowlist already gates every field that could
+carry a fetch, so an unreviewed beta is let through but can do no more than the allowed body permits — which is
+why this isn't the whack-a-mole an allowlist would be (each refused beta surfaces to the guest's Claude Code as a
+spurious login/auth error). Also refused:
+- References to stored server-side state by message id: the `thread` and `diagnostics` fields, and the
+  `message-threads` / `cache-diagnosis` beta families. Nothing ties such an id to this session, so it could name
+  another conversation on the account.
+- Server tools and remote reach: the `web-search`, `web-fetch`, `code-execution`, `computer-use`, `mcp-servers`,
+  `mcp-client`, `mcp-tunnels`, `files-api`, `skills`, `environments`, `ccr-byoc` and `advisor-tool` beta families (and, in the body, any
+  typed tool, the `mcp_servers`/`container` field, or a URL/file source).
+- Betas that charge more per token than the budget counts: `context-1m`, `fast-mode` (and its `speed` field) and
+  `cache-keepalive`. A `[1m]` model fails in the VM. Tests: `python3 -I tests/api-proxy-test.py`. Claude Code's WebSearch tool is therefore unavailable in the VM. Log lines escape control
 characters, and what headless `make agent` prints from the guest and the log has them stripped, so the guest
 can't send escape sequences to your terminal. Interactive mode can't strip them all without breaking Claude Code's
 full-screen interface, so the serial console goes through `scripts/console-filter.py`, which parses it as a terminal
@@ -331,7 +346,11 @@ would and re-emits only allowlisted sequences: text, CSI (cursor, colours, modes
 titles and colour queries. It drops OSC 52 (clipboard write and read), every other OSC (hyperlinks, notifications,
 colour changes), DCS/APC/PM strings, title reports and window moves, C1 controls and bidi characters. At exit it
 resets the terminal modes the guest may have left on and discards late terminal replies before your shell can read
-them. The guest still controls what's on screen while it runs. Tests: `python3 -I tests/console-filter-test.py`.
+them. The guest still controls what's on screen while it runs. Tests: `python3 -I tests/console-filter-test.py`. Both host-side processes that read guest bytes,
+the proxy and the console filter, load a seccomp filter once set up (the same block in both scripts): no exec,
+no ptrace, no namespaces or mounts, no bpf, io_uring, userfaultfd, perf or keyrings; the proxy may open only
+Unix and IP sockets, and the console filter (which runs as you) may open, create or change no file and make no socket or process. It's a
+denylist answering EPERM, so a path nobody traced can't kill a run. Tests: `python3 -I tests/seccomp-test.py`.
 Each session (one proxy process) also has a budget: 500 requests, 50M input tokens (cache reads included), 1M output
 tokens and 60 requests a minute, with an optional model allowlist. Change them with `AGENT_MAX_REQUESTS`,
 `AGENT_MAX_INPUT_TOKENS`, `AGENT_MAX_OUTPUT_TOKENS`, `AGENT_RPM` and `AGENT_MODELS='claude-sonnet-*'` (0 = unlimited).
@@ -393,6 +412,14 @@ host version is noted and ignored. To bump:
 3. Redo the syscall trace (6c), because the allowlist was traced against the old version.
 4. Recheck the proxy's `ALLOW_FIELDS` (`scripts/api-proxy.py`): a new top-level field shows up as `API Error: 403
    field 'X' not allowed` in Claude Code and a DENY line in `out/agent-proxy.log`. Find what X does before adding it.
+5. Recheck `DENY_BETA_PREFIXES`. Betas are a denylist now, so a new *safe* beta needs nothing — it is forwarded.
+   What to look for instead is a new *dangerous* family, or an existing allowed field gaining a fetch/server-state
+   meaning under a new beta. Read the new version's beta table (the `k("name","value")` calls in the binary's
+   strings) and, for anything that reaches out, stores state by id, or raises the per-token price, add its stem to
+   `DENY_BETA_PREFIXES`. To see what the new version actually sends without spending anything, point it at a local
+   server that logs request headers and bodies: `ANTHROPIC_BASE_URL=http://127.0.0.1:<port>`, with the VM's
+   environment (`CLAUDE_CODE_OAUTH_TOKEN=placeholder DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`,
+   a throwaway `HOME`); answer with a streamed `tool_use` so a tool turn runs too.
 
 **Jailed (9.2).** Run `sudo scripts/jail-setup.sh` once, and `make agent` uses the jail from then on. The jail is
 the default: without it, `make agent` refuses to run. `JAIL=0` runs unjailed (Firecracker and the proxy as you), and

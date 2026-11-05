@@ -2,11 +2,12 @@
 """Host-side API proxy for the agent VM (NOTES: "Credentials without a separate gateway").
 
 Listens on a Unix socket: Firecracker turns a guest connection to vsock CID 2 port P into a
-connection to <uds_path>_P on the host. Takes plain HTTP from the guest, strips whatever credential
-the guest sent, adds the real one, and forwards to https://api.anthropic.com over verified TLS.
-Only allowlisted method+path pairs are forwarded, and only bodies that can't make Anthropic's servers
-fetch anything (see body_policy: allowlisted top-level fields, client tools only, inline content
-sources only); everything else gets a 403 and a DENY log line.
+connection to <uds_path>_P on the host. Takes plain HTTP from the guest, keeps only allowlisted
+headers (no credential the guest sent survives), adds the real one, and forwards to
+https://api.anthropic.com over verified TLS. Only allowlisted method+path pairs are forwarded, only with
+the pinned anthropic-version and with the dangerous anthropic-beta families refused (upstream_headers), and
+only bodies that can't make Anthropic's servers fetch anything (body_policy: allowlisted top-level fields,
+client tools only, inline content sources only); everything else gets a 403 and a DENY log line.
 Responses are relayed as they arrive (Claude streams server-sent events).
 
 The credential is read from a file at startup and exists only in this process:
@@ -46,11 +47,41 @@ ALLOW = {
     ("POST", "/v1/messages"),
     ("POST", "/v1/messages/count_tokens"),
 }
+ALLOWED_QUERIES = frozenset({"", "beta=true"})
 OAUTH_BETA = "oauth-2025-04-20"
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer",
        "transfer-encoding", "upgrade", "host", "content-length"}
-DROP_IN = HOP | {"authorization", "x-api-key", "accept-encoding", "cookie"}
 MAX_BODY = 32 << 20
+# Request headers are an allowlist too. anthropic-version and anthropic-beta decide what the body's fields
+# mean, so a body check that ignored them would be checking the wrong request: they are checked here, and
+# everything not named (x-stainless-*, x-claude-code-session-id, anthropic-dangerous-direct-browser-access,
+# cookies, credentials, ...) is dropped. Names are matched case-insensitively and every repeat is seen.
+FORWARD_HEADERS = frozenset({"content-type", "accept", "user-agent", "x-app"})
+ANTHROPIC_VERSION = "2023-06-01"
+# anthropic-beta values are a DENYLIST, not an allowlist. The body policy (ALLOW_FIELDS, client tools
+# only, inline sources only) is the real wall: a beta header does nothing on its own -- it only changes
+# what some request field means, and body_policy already gates every field that could carry a fetch. The
+# web-search beta is inert without a web_search tool (refused by _tool_why); mcp-servers without the
+# mcp_servers field (refused by ALLOW_FIELDS); a server-state beta without its thread/diagnostics field
+# (also out of ALLOW_FIELDS). So any beta is forwarded EXCEPT the families below, which are worth refusing
+# at the header too. Matched by name STEM (prefix), case-insensitively (the value is lowercased before the
+# check, so Web-Search-... is refused too), so a date bump of one of these stays refused. A refused
+# beta gets a 403 naming it (which the guest's Claude Code shows as a login/auth error, then stops).
+DENY_BETA_PREFIXES = (
+    # Server reaches out or runs things -- would turn the API into a route to arbitrary hosts. The matching
+    # body (a server tool, the mcp_servers/container field, a url/file source) is refused by body_policy too.
+    "web-search-", "web-fetch-", "code-execution-", "computer-use-",
+    "mcp-servers-", "mcp-client-", "mcp-tunnels-", "files-api-", "skills-", "environments-", "ccr-byoc-",
+    "advisor-tool-",
+    # Names stored server-side state by id, which nothing ties to this session (a message id from another
+    # session on the account would be read back). The matching fields (thread, diagnostics) are out of
+    # ALLOW_FIELDS too.
+    "message-threads-", "cache-diagnosis-",
+    # Costs more per token than the budget counts. fast-mode's speed field is out of ALLOW_FIELDS too;
+    # context-1m is mostly beta-driven, so a date bump could slip past and bill at the 1M rate -- a cost
+    # risk, not an egress one.
+    "context-1m-", "fast-mode-", "cache-keepalive-",
+)
 # Anything that makes Anthropic's servers reach out on the agent's behalf turns the API into a route
 # to arbitrary hosts (a URL with data in its query string): server tools (web fetch/search, code
 # execution, ...), remote MCP servers, containers, and content blocks whose source is a URL or an
@@ -60,18 +91,28 @@ MAX_BODY = 32 << 20
 # Top-level request fields that are forwarded. Anything else (mcp_servers, container, ...) is a 403.
 # The second group is what the pinned Claude Code (VERSION: CLAUDE_CODE_VERSION) adds to its request
 # body, read from its request builder: safeguards = [{type, classifier_context}] for Anthropic's
-# safety classifiers; speed; thread; diagnostics = {previous_message_id}; cache_control. None of them
-# names something for the server to fetch. On a Claude Code bump, recheck them (HOWTO, "Bump").
+# safety classifiers; cache_control. Neither names something for the server to fetch. Not speed: "fast"
+# is priced per token above what the budget counts (fast-mode beta). Not thread or diagnostics: both carry
+# a previous_message_id, a reference to stored server-side state (see the betas below). The pinned version
+# sends none of the three by default. On a Claude Code bump, recheck them (HOWTO, "Bump").
 ALLOW_FIELDS = frozenset({
     "model", "messages", "system", "max_tokens", "metadata", "stop_sequences", "stream",
     "temperature", "top_k", "top_p", "tools", "tool_choice", "thinking", "service_tier",
     "context_management", "output_format", "output_config",
-    "safeguards", "speed", "thread", "diagnostics", "cache_control",
+    "safeguards", "cache_control",
 })
 # Content block "source" types that carry their data inline. Not "url" (the server fetches it) and not
 # "file" (a Files API upload, which this proxy never allows the agent to make or reference).
 ALLOW_SOURCES = frozenset({"base64", "text", "content"})
 MAX_DEPTH = 64
+
+
+def _tool_why(t):
+    """Client tools, which the agent runs itself, have no "type" (or "custom"); server tools all do."""
+    typ = t.get("type") if isinstance(t, dict) else "?"
+    if typ not in (None, "custom"):
+        return f"server tool {typ!r} not allowed"
+    return None
 
 
 def _walk(v, depth=0):
@@ -87,6 +128,19 @@ def _walk(v, depth=0):
         src = v.get("source")
         if isinstance(src, dict) and src.get("type") not in ALLOW_SOURCES:
             return f"content source type {src.get('type')!r} not allowed"
+        # A tool added inside the conversation (mid-conversation tool changes: a tool_addition block in a
+        # message, or in a compaction block's tool_changes) is held to the same rule as the top-level tools
+        # list. The tool is a definition or a reference by name; any other shape is refused, so a server
+        # tool can't be put there bare or under a wrapper this check doesn't know.
+        if v.get("type") in ("tool_addition", "tool_removal"):
+            t = v.get("tool")
+            kind = t.get("type") if isinstance(t, dict) else None
+            if kind not in ("tool_definition", "tool_reference"):
+                return f"{v['type']} of {kind!r} not allowed"
+        if v.get("type") == "tool_definition":
+            why = _tool_why(v.get("definition"))
+            if why:
+                return why
         # A tool call's arguments are the agent's own JSON, not content blocks: a parameter that
         # happens to be called "source" there means nothing to the server.
         skip = "input" if v.get("type") in ("tool_use", "server_tool_use") else None
@@ -135,17 +189,40 @@ def body_policy(body):
     tools = req.get("tools") or []
     if not isinstance(tools, list):
         return "tools is not a list", req
-    # Client tools, which the agent runs itself, have no "type" (or "custom"); server tools all do.
     for t in tools:
-        typ = t.get("type") if isinstance(t, dict) else "?"
-        if typ not in (None, "custom"):
-            return f"server tool {typ!r} not allowed", req
-    # Sources anywhere in the content: messages, tool_result content, documents nested in documents,
-    # system blocks. Not tool definitions: an input_schema is a schema, never fetched.
+        why = _tool_why(t)
+        if why:
+            return why, req
+    # Sources and tool definitions anywhere in the content: messages, tool_result content, documents
+    # nested in documents, system blocks. Not the top-level tools: an input_schema is a schema, never fetched.
     why = _walk(req.get("messages")) or _walk(req.get("system"))
     if why:
         return why, req
     return None, req
+
+
+def upstream_headers(items):
+    """items: the guest's (name, value) header pairs, repeats included. Return (reason, headers): reason is
+    None if the request may go upstream with headers, which never carry anything the guest sent unchecked."""
+    out, betas, versions = {}, [], set()
+    for k, v in items:
+        name = k.lower()
+        if name == "anthropic-beta":
+            betas += [b.strip() for b in v.split(",") if b.strip()]
+        elif name == "anthropic-version":
+            versions.add(v.strip())
+        elif name in FORWARD_HEADERS and name not in out:
+            out[name] = v
+    if versions - {ANTHROPIC_VERSION}:
+        return f"anthropic-version {sorted(versions - {ANTHROPIC_VERSION})[0][:64]!r} not allowed", None
+    for b in betas:
+        if b.lower().startswith(DENY_BETA_PREFIXES):
+            return f"beta {b[:64]!r} not allowed", None
+    out["anthropic-version"] = ANTHROPIC_VERSION
+    out["anthropic-beta"] = ",".join(dict.fromkeys(betas + [OAUTH_BETA]))
+    out["authorization"] = "Bearer " + TOKEN
+    out["accept-encoding"] = "identity"
+    return None, out
 
 
 def canonical(req):
@@ -346,10 +423,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def handle_any(self):
         t0 = time.monotonic()
-        path_only = self.path.split("?", 1)[0]
+        path_only, _, query = self.path.partition("?")
         if not self.path.startswith("/") or (self.command, path_only) not in ALLOW:
             log(f"DENY  {self.command} {path_only}")
             return self.deny(403, "not on the proxy allowlist")
+        # The query string is checked too: the SDK only ever adds ?beta=true. What goes upstream is rebuilt
+        # from the checked parts, never self.path.
+        if query not in ALLOWED_QUERIES:
+            log(f"DENY  {self.command} {path_only} (query string not allowed)")
+            return self.deny(403, "query string not allowed")
+        upstream_path = path_only + ("?" + query if query else "")
         length = self.headers.get("Content-Length")
         if self.headers.get("Transfer-Encoding") or length is None:
             log(f"DENY  {self.command} {path_only} (no Content-Length)")
@@ -363,6 +446,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             log(f"DENY  {self.command} {path_only} (body {n} bytes)")
             return self.deny(413, "request body too large")
         body = self.rfile.read(n)
+        why, headers = upstream_headers(self.headers.items())
+        if why:
+            log(f"DENY  {self.command} {path_only} ({why})")
+            return self.deny(403, why)
         why, req = body_policy(body)
         if why:
             log(f"DENY  {self.command} {path_only} ({why})")
@@ -375,20 +462,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.deny(code, msg, etype)
         usage = None
 
-        headers = {k: v for k, v in self.headers.items() if k.lower() not in DROP_IN}
-        headers["Authorization"] = "Bearer " + TOKEN
-        beta = [b.strip() for b in headers.pop("anthropic-beta", "").split(",") if b.strip()]
-        if OAUTH_BETA not in beta:
-            beta.append(OAUTH_BETA)
-        headers["anthropic-beta"] = ",".join(beta)
-        headers["Accept-Encoding"] = "identity"
-        headers["Content-Length"] = str(len(body))
+        headers["content-length"] = str(len(body))
 
         up = UpstreamConnection(UPSTREAM, 443, context=TLS, timeout=600)
         sent = 0
         status = "-"
         try:
-            up.request(self.command, self.path, body=body, headers=headers)
+            up.request(self.command, upstream_path, body=body, headers=headers)
             resp = up.getresponse()
             status = resp.status
             self.send_response(resp.status, resp.reason)
@@ -474,6 +554,93 @@ class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
             self.slots.release()
 
 
+# --- seccomp: begin (kept identical in scripts/api-proxy.py and scripts/console-filter.py; ---
+# --- tests/seccomp-test.py checks that) ---
+# A host process that parses guest-controlled bytes gets a seccomp filter once it has set itself up. It
+# is a denylist that answers EPERM, not an allowlist that kills: CPython with threads and TLS uses
+# syscalls nobody wants to enumerate, and a miss must not take the console or the proxy down mid-run.
+# What it removes is the kernel surface a compromised process would reach for next: exec, debugging other
+# processes, namespaces and mounts, bpf, io_uring, userfaultfd, perf, keyrings, modules, kexec, terminal
+# input injection (TIOCSTI). x86_64
+# only, like the rest of the repo (Firecracker's release binaries are x86_64); anything else refuses to
+# start rather than run unfiltered. Standard library only (ctypes): the scripts run under python3 -I.
+SECCOMP_DENY_COMMON = {
+    "execve": 59, "execveat": 322, "ptrace": 101, "process_vm_readv": 310, "process_vm_writev": 311,
+    "process_madvise": 440, "pidfd_getfd": 438, "personality": 135,
+    "unshare": 272, "setns": 308, "mount": 165, "umount2": 166, "pivot_root": 155, "chroot": 161,
+    "fsopen": 430, "fsconfig": 431, "fsmount": 432, "fspick": 433, "move_mount": 429, "open_tree": 428,
+    "open_tree_attr": 467, "mount_setattr": 442,
+    "bpf": 321, "perf_event_open": 298, "userfaultfd": 323,
+    "io_uring_setup": 425, "io_uring_enter": 426, "io_uring_register": 427,
+    "keyctl": 250, "add_key": 248, "request_key": 249,
+    "init_module": 175, "finit_module": 313, "delete_module": 176, "kexec_load": 246, "kexec_file_load": 320,
+    "open_by_handle_at": 304, "name_to_handle_at": 303, "swapon": 167, "swapoff": 168, "reboot": 169,
+    "acct": 163, "quotactl": 179,
+}
+_NR_CLONE, _NR_CLONE3, _NR_SOCKET, _NR_IOCTL = 56, 435, 41, 16
+# ioctls that act on another process's input: TIOCSTI pushes bytes into a terminal's input queue (the
+# console filter's stdout is the user's terminal, so that would type commands into their shell), and
+# TIOCLINUX can do the same on a virtual console. Refused even where dev.tty.legacy_tiocsti=0.
+_IOCTL_DENY = (0x5412, 0x541C)   # TIOCSTI, TIOCLINUX
+# CLONE_NEWNS | NEWCGROUP | NEWUTS | NEWIPC | NEWUSER | NEWPID | NEWNET
+_CLONE_NS = 0x00020000 | 0x02000000 | 0x04000000 | 0x08000000 | 0x10000000 | 0x20000000 | 0x40000000
+
+
+def install_seccomp(extra_deny=(), socket_families=None, threads=True):
+    """Load the filter into this process (all its threads). extra_deny: more syscall numbers to refuse.
+    socket_families: the address families socket() may create (an empty tuple refuses socket() outright;
+    None leaves it alone). threads=False refuses clone() too; otherwise clone() may make threads but no
+    namespaces. clone3() answers ENOSYS, so glibc falls back to clone(), whose flags a filter can read.
+    Raises OSError if the filter could not be loaded: callers stop rather than run without it."""
+    import ctypes
+    import struct
+
+    if os.uname().machine != "x86_64":
+        raise OSError(f"seccomp filter: x86_64 only, not {os.uname().machine}")
+    LD, JEQ, JGE, JSET, RET = 0x20, 0x15, 0x35, 0x45, 0x06   # BPF_LD|W|ABS, BPF_JMP|{JEQ,JGE,JSET}|K, BPF_RET|K
+    KILL, ALLOW = 0x80000000, 0x7FFF0000                      # SECCOMP_RET_KILL_PROCESS, SECCOMP_RET_ALLOW
+    EPERM, ENOSYS = 0x00050000 | 1, 0x00050000 | 38           # SECCOMP_RET_ERRNO | errno
+    prog = [
+        (LD, 0, 0, 4), (JEQ, 1, 0, 0xC000003E), (RET, 0, 0, KILL),   # arch must be AUDIT_ARCH_X86_64
+        (LD, 0, 0, 0), (JGE, 0, 1, 0x40000000), (RET, 0, 0, KILL),   # no x32 numbers past the denylist
+    ]
+    for nr in sorted(set(SECCOMP_DENY_COMMON.values()) | set(extra_deny)):
+        prog += [(JEQ, 0, 1, nr), (RET, 0, 0, EPERM)]
+    prog += [(JEQ, 0, 1, _NR_CLONE3), (RET, 0, 0, ENOSYS)]
+    # ioctl: args[1] low word (offset 24) is the request
+    prog += [(JEQ, 0, len(_IOCTL_DENY) + 3, _NR_IOCTL), (LD, 0, 0, 24)]
+    prog += [(JEQ, len(_IOCTL_DENY) - i, 0, c) for i, c in enumerate(_IOCTL_DENY)]
+    prog += [(RET, 0, 0, ALLOW), (RET, 0, 0, EPERM)]
+    if threads:   # args[0] low word (offset 16): the flags
+        prog += [(JEQ, 0, 4, _NR_CLONE), (LD, 0, 0, 16), (JSET, 0, 1, _CLONE_NS), (RET, 0, 0, EPERM), (RET, 0, 0, ALLOW)]
+    else:
+        prog += [(JEQ, 0, 1, _NR_CLONE), (RET, 0, 0, EPERM)]
+    if socket_families is not None:
+        fams = list(socket_families)
+        prog += [(JEQ, 0, len(fams) + 3, _NR_SOCKET), (LD, 0, 0, 16)]
+        prog += [(JEQ, len(fams) - i, 0, f) for i, f in enumerate(fams)]
+        prog += [(RET, 0, 0, EPERM), (RET, 0, 0, ALLOW)]
+    prog.append((RET, 0, 0, ALLOW))
+
+    buf = ctypes.create_string_buffer(b"".join(struct.pack("<HBBI", *i) for i in prog))
+
+    class SockFprog(ctypes.Structure):
+        _fields_ = [("len", ctypes.c_ushort), ("filter", ctypes.c_void_p)]
+
+    fprog = SockFprog(len(prog), ctypes.addressof(buf))
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.syscall.restype = ctypes.c_long
+    libc.prctl.restype = ctypes.c_int
+    # PR_SET_NO_NEW_PRIVS: required to load a filter without CAP_SYS_ADMIN, and nothing here needs privs.
+    if libc.prctl(38, ctypes.c_ulong(1), ctypes.c_ulong(0), ctypes.c_ulong(0), ctypes.c_ulong(0)) != 0:
+        raise OSError(ctypes.get_errno(), "prctl(PR_SET_NO_NEW_PRIVS)")
+    # seccomp(SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_TSYNC, &prog): every thread, or none.
+    rc = libc.syscall(ctypes.c_long(317), ctypes.c_long(1), ctypes.c_long(1), ctypes.byref(fprog))
+    if rc != 0:
+        raise OSError(ctypes.get_errno(), f"seccomp(SECCOMP_SET_MODE_FILTER) returned {rc}")
+# --- seccomp: end ---
+
+
 def main():
     global TOKEN, LOG, BUDGET, ADDRS
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
@@ -528,6 +695,13 @@ def main():
         f"output tokens {a.max_output_tokens or 'unlimited'}, {a.rpm or 'unlimited'}/min, models {a.models or 'any'}", always=True)
     log(f"limits: {Server.max_connections} connections, {a.idle_timeout:g}s idle timeout, "
         f"{a.max_log_lines} log lines", always=True)
+    # Token read, log open, socket bound: from here on the proxy only serves. Unix sockets for the guest,
+    # TCP to the API; no other socket family.
+    try:
+        install_seccomp(socket_families=(socket.AF_UNIX, socket.AF_INET, socket.AF_INET6))
+    except OSError as e:
+        sys.exit(f"api-proxy: {e}; not running without the seccomp filter")
+    log("seccomp: filter loaded", always=True)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))  # run-agent.sh stops the proxy with TERM
     try:
         srv.serve_forever()
