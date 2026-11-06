@@ -22,13 +22,27 @@ if [ "$who" = root ]; then
   done
   check "/proc hidepid=invisible" "$(has_opt /proc hidepid=invisible)" "$(mount_opts /proc)"
   check "/sys mounted ro" "$(has_opt /sys ro)" "$(mount_opts /sys)"
-  for s in kernel/kptr_restrict:2 vm/memfd_noexec:2 kernel/dmesg_restrict:1; do
+  # user.max_user_namespaces: USER_NS is compiled out (the probe proves unshare fails), but 6.18 shows the
+  # knob regardless, so it is pinned to 0 (vm.json.in) rather than left at a default that reads as "on".
+  for s in kernel/kptr_restrict:2 vm/memfd_noexec:2 kernel/dmesg_restrict:1 user/max_user_namespaces:0 \
+           fs/protected_symlinks:1 fs/protected_hardlinks:1 fs/protected_fifos:2 fs/protected_regular:2; do
     v="$(cat "/proc/sys/${s%%:*}" 2>&1)"
     check "${s%%:*} = ${s##*:}" "$([ "$v" = "${s##*:}" ] && echo 1 || echo 0)" "$v"
   done
   check "/dev/kmsg mode 600" "$([ "$(stat -c %a /dev/kmsg)" = 600 ] && echo 1 || echo 0)" "mode $(stat -c %a /dev/kmsg)"
   check "bridge listening on 127.0.0.1:8080" "$(grep -q ':1F90 00000000:0000 0A' /proc/net/tcp && echo 1 || echo 0)" "/proc/net/tcp"
   check "/home/agent owned by the agent" "$([ "$(stat -c %u /home/agent)" = "$AGENT_UID" ] && echo 1 || echo 0)" "uid $(stat -c %u /home/agent)"
+  # /bin/bash is the W^X launcher (tool-shell.c) unless agent_exec=1 bind-mounted the real bash over it.
+  diff -q /bin/bash /bin/bash.real >/dev/null 2>&1 && same=1 || same=0
+  if [ "$agent_exec" = 1 ]; then check "/bin/bash is the real bash (agent_exec=1)" "$same" ""
+  else check "/bin/bash is the tool-shell launcher" "$((1 - same))" ""; fi
+  for s in memory.max:1610612736 memory.oom.group:1 pids.max:512; do
+    v="$(cat "/sys/fs/cgroup/agent/${s%%:*}" 2>&1)"
+    check "agent cgroup ${s%%:*} = ${s##*:}" "$([ "$v" = "${s##*:}" ] && echo 1 || echo 0)" "$v"
+  done
+  for f in managed-settings.json managed-mcp.json; do
+    check "/etc/claude-code/$f present, root-owned" "$([ -s "/etc/claude-code/$f" ] && [ "$(stat -c %u "/etc/claude-code/$f")" = 0 ] && echo 1 || echo 0)" "$(stat -c '%U %a' "/etc/claude-code/$f" 2>&1)"
+  done
   exit "$fails"
 fi
 
@@ -41,6 +55,14 @@ check "process limit 512" "$([ "$(ulimit -u)" = 512 ] && echo 1 || echo 0)" "uli
 check "seccomp filter" "$(grep -q '^Seccomp:[[:space:]]*2' /proc/self/status && echo 1 || echo 0)" ""
 others="$(for p in /proc/[0-9]*; do u="$(awk '/^Uid:/{print $2}' "$p/status" 2>/dev/null)"; [ -n "$u" ] && [ "$u" != "$AGENT_UID" ] && echo "${p#/proc/}"; done | wc -l)"
 check "sees only its own processes (hidepid)" "$([ "$others" = 0 ] && echo 1 || echo 0)" "$others foreign pids visible"
+cg="$(cut -d: -f3 /proc/self/cgroup)"
+check "runs in the agent cgroup" "$([ "$cg" = /agent ] && echo 1 || echo 0)" "$cg"
+out="$( { echo $$ > /sys/fs/cgroup/cgroup.procs; } 2>&1)"
+check "can't leave the agent cgroup" "$([ -n "$out" ] && [ "$(cut -d: -f3 /proc/self/cgroup)" = /agent ] && echo 1 || echo 0)" "${out##*: }"
+# Claude Code reads its managed settings as the agent, so they must be readable; the ro root keeps them fixed.
+check "can read the managed settings" "$([ -r /etc/claude-code/managed-settings.json ] && grep -q allowManagedHooksOnly /etc/claude-code/managed-settings.json && echo 1 || echo 0)" ""
+out="$( { : > /etc/claude-code/managed-settings.json; } 2>&1)"
+check "can't change the managed settings" "$([ -n "$out" ] && [ -s /etc/claude-code/managed-settings.json ] && echo 1 || echo 0)" "${out##*: }"
 
 out="$( { cat /dev/kmsg; } 2>&1 | head -n 1)"
 check "can't open /dev/kmsg" "$(case "$out" in *"Permission denied"*) echo 1 ;; *) echo 0 ;; esac)" "$out"
@@ -56,16 +78,35 @@ if [ "$agent_exec" != 1 ]; then
     check "can't run a binary it wrote in $d" "$([ $rc = 126 ] && echo 1 || echo 0)" "exit $rc ${out##*: }"
   done
 fi
+# Tool shells: Claude Code runs Bash tool commands through /bin/bash, the W^X launcher, so a tool shell
+# can't make memory executable, and neither can anything it starts, the real bash included.
+if [ "$agent_exec" != 1 ]; then
+  out="$(/bin/bash -c 'echo tool-shell-ok' 2>&1)"
+  check "tool shell runs" "$([ "$out" = tool-shell-ok ] && echo 1 || echo 0)" "$out"
+  /bin/bash -c jit-probe >/dev/null 2>&1; rc=$?
+  check "tool shell can't JIT (W^X enforced)" "$([ $rc = 1 ] && echo 1 || echo 0)" "jit-probe exit $rc"
+  /bin/bash -c '/bin/bash.real -c jit-probe' >/dev/null 2>&1; rc=$?
+  check "tool shell can't shed the filter via bash.real" "$([ $rc = 1 ] && echo 1 || echo 0)" "jit-probe exit $rc"
+else
+  /bin/bash -c jit-probe >/dev/null 2>&1; rc=$?
+  check "tool shell JIT allowed (agent_exec=1)" "$([ $rc = 0 ] && echo 1 || echo 0)" "jit-probe exit $rc"
+fi
 # KNOWN GAP, asserted so it stays visible and honest: noexec and memfd_noexec stop the agent running a
-# binary it wrote to a file or a memfd, but NOT native code it JITs into anonymous memory. jail-exec
-# allows mmap/mprotect with any prot (it must: Claude Code is a Bun/JSC JIT), and no kernel option
-# enforces userspace W^X, so an in-process JIT (bun:ffi TinyCC, JSC, ctypes, ...) can run agent-written
-# code. jit-probe returns 0 when that works. We record 0 as the expected state; the day it flips to 1
-# the policy changed and this line (and the docs) must be revisited.
+# binary it wrote to a file or a memfd, but NOT native code Claude Code's own process JITs into anonymous
+# memory. jail-exec allows mmap/mprotect with any prot for that process (it must: Claude Code is a Bun/JSC
+# JIT), and no kernel option enforces userspace W^X. Tool shells are covered by the launcher above; this
+# records the main process. jit-probe returns 0 when JIT works. We record 0 as the expected state; the
+# day it flips to 1 the policy changed and this line (and the docs) must be revisited.
 jit-probe >/dev/null 2>&1; jrc=$?
 check "in-process JIT works (W^X NOT enforced; known, see HOWTO 9.5)" "$([ $jrc = 0 ] && echo 1 || echo 0)" \
   "jit-probe exit $jrc ($([ $jrc = 0 ] && echo 'anonymous PROT_EXEC allowed' || echo 'blocked/inconclusive -- policy changed, revisit docs'))"
 
+# Socket families: jail-exec's seccomp allows AF_UNIX, AF_INET and AF_INET6 only (--vsock is the bridge's,
+# not the agent's). AF_VSOCK is the guest-host channel; AF_NETLINK is kernel configuration surface.
+out="$(socat -T1 - VSOCK-CONNECT:2:8080 </dev/null 2>&1)"
+check "AF_VSOCK socket refused (seccomp)" "$(case "$out" in *"not permitted"*) echo 1 ;; *) echo 0 ;; esac)" "${out##*: }"
+out="$(ip link show 2>&1)"
+check "AF_NETLINK socket refused (seccomp)" "$(case "$out" in *"not permitted"*) echo 1 ;; *) echo 0 ;; esac)" "${out##*: }"
 # TCP: Landlock allows connect to 8080 only.
 out="$( { exec 3<>/dev/tcp/127.0.0.1/9; } 2>&1)"
 check "TCP connect to port 9 refused" "$(case "$out" in *"Permission denied"*) echo 1 ;; *) echo 0 ;; esac)" "${out##*: }"

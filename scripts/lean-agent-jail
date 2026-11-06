@@ -28,7 +28,11 @@
 #     Egress: root resolves api.anthropic.com, hands the addresses to the proxy (which then needs no
 #     DNS), and nftables (table inet lean_agent) lets uid lean-proxy open TCP 443 to those addresses
 #     only; everything else it sends is rejected.
-#   Firecracker: also a file size limit (it only ever writes into the fixed-size scratch drive).
+#   Firecracker: also a file size limit (it only ever writes into the fixed-size scratch drive). It never
+#     holds the caller's terminal: stdin is a pipe fed by a relay (cat, as OWNER) reading the wrapper's
+#     stdin, stderr goes to OUT/runs/ID/firecracker.log as OWNER, and stdout is the caller's (the console
+#     filter, or the headless log). With the tty on fd 0 or 2, a compromised VMM could write escape
+#     sequences to the terminal past the console filter, which only sees stdout.
 #   On exit: the scratch drive is copied back to OUT/runs/ID (run-agent.sh keeps it for KEEP_SCRATCH=1
 #   or discards it), the proxy log is in OUT/runs/ID/agent-proxy.log, everything else is removed.
 set -euo pipefail
@@ -211,7 +215,7 @@ if [[ "${1:-}" == "--check" ]]; then
     [[ "$(stat -fc %T /sys/fs/cgroup)" == cgroup2fs ]] || die "cgroups v2 not mounted at /sys/fs/cgroup"
     for c in memory pids cpu; do grep -qw "$c" /sys/fs/cgroup/cgroup.subtree_control || die "cgroup controller $c not enabled at the root"; done
     echo "cgroups:     v2, Firecracker memory.max=$MEM_MAX pids.max=$PIDS_MAX cpu.max=$CPU_MAX;"
-    echo "             proxy memory.max=${PROXY_MEM_MAX:-$((256 * 1024 * 1024))} pids.max=${PROXY_PIDS_MAX:-32}"
+    echo "             proxy memory.max=${PROXY_MEM_MAX:-$((256 * 1024 * 1024))} pids.max=${PROXY_PIDS_MAX:-32} cpu.max=${PROXY_CPU_MAX:-100000 100000}"
   else
     echo "cgroups:     off (CGROUPS=0 in $CONF)"
   fi
@@ -250,12 +254,16 @@ tok_mode="$(as_owner stat -c %a "$TOKEN_FILE")" || die "can't read $TOKEN_FILE a
 
 id="agent-$(date +%Y%m%d-%H%M%S)-$$"
 run="$BASE/firecracker/$id"; jail="$run/root"; pdir="$run/proxy"; ns="lean-$id"
-proxy=""; fc=""; started=0
+proxy=""; fc=""; relay=""; started=0
 as_fc() { setpriv --reuid="$fc_uid" --regid="$fc_gid" --clear-groups --no-new-privs -- "$@"; }
 cleanup() {
   local rc=$?
-  [[ -n "$fc" ]] && { kill "$fc" 2>/dev/null; wait "$fc" 2>/dev/null || true; }
-  [[ -n "$proxy" ]] && { kill "$proxy" 2>/dev/null; wait "$proxy" 2>/dev/null || true; }
+  # Each kill may find its process already gone (a crashed VMM, a proxy the guest got OOM-killed, a
+  # relay that hit EOF); under set -e a failed kill would end this trap before the run is cleaned up.
+  [[ -n "$fc" ]] && { kill "$fc" 2>/dev/null || true; wait "$fc" 2>/dev/null || true; }
+  # The stdin relay sits in read() on the terminal; left behind, it would eat the owner's next keystrokes.
+  [[ -n "$relay" ]] && { kill "$relay" 2>/dev/null || true; wait "$relay" 2>/dev/null || true; }
+  [[ -n "$proxy" ]] && { kill "$proxy" 2>/dev/null || true; wait "$proxy" 2>/dev/null || true; }
   # Keep the agent's home: copy the scratch drive back to the run directory. Once Firecracker
   # has run, everything under $jail is its uid's: read it as that uid, never as root, or a swapped-in
   # symlink would make root copy out a file Firecracker's uid can't read.
@@ -310,8 +318,10 @@ as_owner cat -- "$TOKEN_FILE" | setpriv --reuid=lean-proxy --regid=lean-proxy --
     python3 -I "$pdir/api-proxy.py" --listen "$pdir/p.sock" --token-fd 0 "${upstream_args[@]}" "${proxy_args[@]}" \
     2> >(as_owner sh -c 'cat >> "$1"' sh "$RUNDIR/agent-proxy.log") &
 proxy=$!
-# The proxy in its own cgroup next to Firecracker's: memory and task limits on the host side of the
-# vsock, whatever the guest sends. Its own connection cap (16) keeps it well under the task limit.
+# The proxy in its own cgroup next to Firecracker's: memory, task and CPU limits on the host side of the
+# vsock, whatever the guest sends. Its own connection cap (16) keeps it well under the task limit. The CPU
+# cap (one CPU by default) bounds what a stream of refused requests costs: the body is parsed before the
+# budget and rate limit apply, so those don't count a request that never goes upstream.
 if [[ "${CGROUPS:-1}" == 1 ]]; then
   mkdir -p "/sys/fs/cgroup/$CG_PARENT"
   echo "+memory +pids +cpu" > "/sys/fs/cgroup/$CG_PARENT/cgroup.subtree_control"
@@ -319,6 +329,7 @@ if [[ "${CGROUPS:-1}" == 1 ]]; then
   mkdir "$pcg"
   echo "${PROXY_MEM_MAX:-$((256 * 1024 * 1024))}" > "$pcg/memory.max"
   echo "${PROXY_PIDS_MAX:-32}" > "$pcg/pids.max"
+  echo "${PROXY_CPU_MAX:-100000 100000}" > "$pcg/cpu.max"
   echo "$proxy" > "$pcg/cgroup.procs" || die "could not move the proxy into $pcg"
 fi
 for _ in $(seq 50); do [[ -S "$pdir/p.sock" ]] && break; sleep 0.1; done
@@ -345,14 +356,21 @@ if [[ "${CGROUPS:-1}" == 1 ]]; then
   cg=(--cgroup-version 2 --parent-cgroup "$CG_PARENT"
       --cgroup "memory.max=$MEM_MAX" --cgroup "pids.max=$PIDS_MAX" --cgroup "cpu.max=$CPU_MAX")
 fi
-# In the background (stdin kept for the serial console) so a signal runs the trap at once instead of
-# waiting for the VM to exit; the jailer execs into Firecracker, so $fc is Firecracker's pid.
+# In the background so a signal runs the trap at once instead of waiting for the VM to exit; the jailer
+# execs into Firecracker, so $fc is Firecracker's pid. Firecracker gets no terminal fd: keystrokes arrive
+# through a pipe from a relay reading this wrapper's stdin as OWNER (the owner's terminal, raw, or
+# /dev/null when headless), and its stderr is a file in the run directory, written as OWNER. The shell
+# closes its copy of the pipe once Firecracker holds it, so the relay's exit is EOF for the serial console.
 started=1
+exec {fc_in}< <(as_owner cat)
+relay=$!
 "$LIB/jailer" --id "$id" --exec-file "$LIB/firecracker" --uid "$fc_uid" --gid "$fc_gid" \
   --chroot-base-dir "$BASE" --netns "/run/netns/$ns" "${cg[@]}" --resource-limit no-file=1024 \
   --resource-limit "fsize=$FSIZE_MAX" \
-  -- --no-api --config-file vm.json --level Error <&0 &
+  -- --no-api --config-file vm.json --level Error <&"$fc_in" \
+  2> >(as_owner sh -c 'cat >> "$1"' sh "$RUNDIR/firecracker.log") &
 fc=$!
+exec {fc_in}<&-
 rc=0; wait "$fc" || rc=$?
 fc=""
 exit "$rc"

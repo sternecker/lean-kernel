@@ -142,6 +142,9 @@ sys.stdout.write(re.sub(r"[\x00-\x08\x0b-\x1f\x7f-\x9f؜​-‏‪-‮⁦-⁩﻿
 }
 log="$RUN/agent.log"
 plog="$RUN/agent-proxy.log"
+# Jailed: Firecracker's own stderr (jailer errors, VMM errors), kept off the terminal and shown stripped.
+fclog="$RUN/firecracker.log"
+show_fclog() { [[ -s "$fclog" ]] && { echo "--- firecracker ---"; tail -n 20 "$fclog" | sanitize; }; return 0; }
 # The guest's exit status: the last AGENT-EXIT line init printed (agent lines are prefixed "| ").
 agent_exit() { grep '^AGENT-EXIT=' "$log" | tail -n 1; }
 
@@ -189,7 +192,7 @@ EOF
   launch=(sudo -n "$WRAPPER" run="$run_id" "${budget[@]}")
   where="jailed: Firecracker as a per-run uid, proxy as lean-proxy"
 else
-  python3 "$ROOT/scripts/api-proxy.py" --listen "${vsock}_8080" --token-file "$TOKEN_FILE" \
+  python3 -I "$ROOT/scripts/api-proxy.py" --listen "${vsock}_8080" --token-file "$TOKEN_FILE" \
     "${budget[@]/#/--}" 2>>"$plog" &
   proxy=$!
   for _ in $(seq 50); do [[ -S "${vsock}_8080" ]] && break; sleep 0.1; done
@@ -211,6 +214,9 @@ if [[ "$mode" == headless || "$mode" == selftest ]]; then
   denials="$(sed -n '/^DENIALS-BEGIN$/,/^DENIALS-END$/p' "$log" | sed '1d;$d')"
   if [[ -n "$denials" ]]; then echo "--- refused by jail-exec (seccomp type=1326, Landlock type=1423) ---"; echo "$denials" | sanitize; fi
   echo "--- proxy log ---"; tail -n 20 "$plog" 2>/dev/null | sanitize
+  show_fclog
+  # Printed by init after the agent exits: whether Claude Code loaded the image's managed settings.
+  grep -m1 '^MANAGED-HOOKS=' "$log" | sed 's/^/managed settings: /; s/MANAGED-HOOKS=//' || true   # absent in selftest mode
   grep -q 'Kernel panic' "$log" && die "guest panicked; see $log"
   if [[ "$mode" == selftest ]]; then
     [[ "$(agent_exit)" == AGENT-EXIT=0 ]] || die "agent self-test failed (SELFTEST FAIL lines above); see $log"
@@ -233,4 +239,6 @@ else
   # needs pass, and the ones that reach past the screen (OSC 52 clipboard write/read, hyperlinks,
   # title reports, DCS/APC strings, window moves) are dropped. Keystrokes go to the guest unfiltered.
   "${launch[@]}" | python3 -I "$ROOT/scripts/console-filter.py"
+  [[ -n "$cleanup_tty" ]] && stty "$cleanup_tty"   # cooked again for the tail below; finish() restores and flushes too
+  show_fclog
 fi

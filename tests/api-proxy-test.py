@@ -109,6 +109,23 @@ for b, ok, what in [
     why, _ = ap.body_policy(b)
     check(f"body {what}", (why is None) == ok, why)
 
+# Guest-chosen text in a refusal is cut: a 1 MB field name or source type is not a 1 MB log line or 403.
+big = "A" * (1 << 20)
+for b, what in [(body(**{big: 1}), "field name"),
+                (body(messages=[{"role": "user", "content": [{"type": "image", "source": {"type": big}}]}]), "source type"),
+                (body(tools=[{"type": big}]), "tool type"),
+                (("{" + json.dumps(big) + ":1," + json.dumps(big) + ":2}").encode(), "duplicate key")]:
+    why, _ = ap.body_policy(b)
+    check(f"refusal cut: {what}", why is not None and len(why) < 200, why and len(why))
+refused = ap.Budget(0, 0, 0, 0, "").admit([big])   # a non-string model is refused with its repr
+check("refusal cut: model", refused and len(refused[2]) < 200, refused and len(refused[2]))
+import io
+buf, keep = io.StringIO(), ap.LOG
+ap.LOG = buf
+ap.log("x" * 100000, always=True)
+ap.LOG = keep
+check("log line cut", len(buf.getvalue()) < ap.MAX_LOG_LINE + 64, len(buf.getvalue()))
+
 # Through the handler: the query string is checked, and what goes upstream is the checked path.
 import socket
 import tempfile

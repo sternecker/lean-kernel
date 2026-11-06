@@ -15,7 +15,9 @@ The credential is read from a file at startup and exists only in this process:
   --token-fd N         the same token, read from an inherited fd (the jail wrapper pipes it in, so
                        the proxy's own user never needs access to the file).
 Headers and bodies are never logged; one line per request: verdict, method, path, status, bytes, time,
-and for messages the tokens used and the running totals.
+and for messages the tokens used and the running totals. Guest-chosen text in a refusal (a field name, a
+source type, a model) is cut to 64 characters, and every log line to MAX_LOG_LINE, so the guest can't
+grow the host log by bytes the way the line cap and rate limit stop it growing by lines.
 
 Budget, per proxy process (one VM session); 0 means unlimited. Over budget: 403 proxy_budget_exhausted.
 Over the rate: 429 with Retry-After, which Claude Code backs off on. Totals are counted from the usage
@@ -105,13 +107,21 @@ ALLOW_FIELDS = frozenset({
 # "file" (a Files API upload, which this proxy never allows the agent to make or reference).
 ALLOW_SOURCES = frozenset({"base64", "text", "content"})
 MAX_DEPTH = 64
+MAX_LOG_LINE = 1024
+
+
+def _short(v, n=64):
+    """repr of a guest-chosen value, cut to n characters: it ends up in a log line and in the 403 body,
+    and a 32 MB field name must not become a 32 MB line of either."""
+    s = repr(v)
+    return s if len(s) <= n else s[:n] + "..."
 
 
 def _tool_why(t):
     """Client tools, which the agent runs itself, have no "type" (or "custom"); server tools all do."""
     typ = t.get("type") if isinstance(t, dict) else "?"
     if typ not in (None, "custom"):
-        return f"server tool {typ!r} not allowed"
+        return f"server tool {_short(typ)} not allowed"
     return None
 
 
@@ -127,7 +137,7 @@ def _walk(v, depth=0):
     elif isinstance(v, dict):
         src = v.get("source")
         if isinstance(src, dict) and src.get("type") not in ALLOW_SOURCES:
-            return f"content source type {src.get('type')!r} not allowed"
+            return f"content source type {_short(src.get('type'))} not allowed"
         # A tool added inside the conversation (mid-conversation tool changes: a tool_addition block in a
         # message, or in a compaction block's tool_changes) is held to the same rule as the top-level tools
         # list. The tool is a definition or a reference by name; any other shape is refused, so a server
@@ -136,7 +146,7 @@ def _walk(v, depth=0):
             t = v.get("tool")
             kind = t.get("type") if isinstance(t, dict) else None
             if kind not in ("tool_definition", "tool_reference"):
-                return f"{v['type']} of {kind!r} not allowed"
+                return f"{v['type']} of {_short(kind)} not allowed"
         if v.get("type") == "tool_definition":
             why = _tool_why(v.get("definition"))
             if why:
@@ -178,14 +188,14 @@ def body_policy(body):
     try:
         req = json.loads(body, object_pairs_hook=_no_duplicates, parse_constant=_no_constant)
     except DuplicateKey as e:
-        return f"duplicate key {str(e)!r}", None
+        return f"duplicate key {_short(str(e))}", None
     except (ValueError, RecursionError):
         return "body is not JSON", None
     if not isinstance(req, dict):
         return "body is not a JSON object", None
     for k in req:
         if k not in ALLOW_FIELDS:
-            return f"field {k!r} not allowed", req
+            return f"field {_short(k)} not allowed", req
     tools = req.get("tools") or []
     if not isinstance(tools, list):
         return "tools is not a list", req
@@ -249,7 +259,7 @@ class Budget:
         """Return None to forward, else (status, error type, message)."""
         with self.lock:
             if not isinstance(model, str) or not self.model_ok(model):
-                why = (403, "proxy_denied", f"model {model!r} not allowed")
+                why = (403, "proxy_denied", f"model {_short(model)} not allowed")
             elif self.max_requests and self.requests >= self.max_requests:
                 why = (403, "proxy_budget_exhausted", f"request budget used up ({self.max_requests})")
             elif self.max_input and self.inp >= self.max_input:
@@ -383,6 +393,9 @@ def printable(s):
 
 
 def log(line, always=False):
+    # The backstop for anything a format site forgot to cut (a request path, an exception's text).
+    if len(line) > MAX_LOG_LINE:
+        line = line[:MAX_LOG_LINE] + " ..."
     line = printable(line)
     stamp = time.strftime("%H:%M:%S ")
     if not always:

@@ -118,11 +118,15 @@ No claim is made that any of this is complete or correct. It is hand-built defen
 and gaps, some listed here and asserted by `make agent-test`, others not yet found. The checks keep the
 posture visible, they don't certify it.
 
-- In-process JIT defeats `noexec`/`memfd_noexec`: the agent can `mmap`/`mprotect` anonymous memory
-  executable and run native code it generated at runtime, so the "can't run a binary it wrote" protection
-  covers only file- and memfd-based exec. It can't be closed at the seccomp layer, because Claude Code is
-  a Bun/JavaScriptCore JIT and needs anonymous executable memory to run JavaScript at all; closing it means
-  a different mechanism and a no-JIT runtime. `guest/jit-probe.c` + `make agent-test` assert it stays known.
+- In-process JIT defeats `noexec`/`memfd_noexec` for Claude Code's own process: it can `mmap`/`mprotect`
+  anonymous memory executable and run native code generated at runtime, so the "can't run a binary it wrote"
+  protection covers only file- and memfd-based exec there. It can't be closed for that process, because Claude
+  Code is a Bun/JavaScriptCore JIT and needs anonymous executable memory to run JavaScript at all; closing it
+  means a different mechanism and a no-JIT runtime. It is closed for everything the agent runs *through* that
+  process: `/bin/bash` in the image is a launcher (`guest/tool-shell.c`) that loads a W^X seccomp filter and
+  execs the real bash, so a Bash tool command and all its children can't run the Bun runtime (no `claude`
+  with a `NODE_OPTIONS`/`BUN_*` preload, no `bun:ffi` TinyCC) or any other JIT. What's left is the JIT the
+  model can't feed arbitrary code into. `guest/jit-probe.c` + `make agent-test` assert both halves.
   The practical impact is kernel-syscall surface, not a new host-boundary privilege (see HOWTO §9.5).
 - Host-side bugs: virtio device emulation in Firecracker, KVM itself. The jailer (step 9.2 in HOWTO)
   bounds the VMM; nothing in this repo bounds KVM.

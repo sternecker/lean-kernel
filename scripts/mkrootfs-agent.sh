@@ -55,6 +55,10 @@ gcc -static -O2 -Wall -Wextra -Werror -o "$OUT/jail-exec" "$ROOT/guest/jail-exec
 # A posture probe for agent-selftest: whether the agent can make anonymous memory executable (in-process
 # JIT, which noexec and memfd_noexec do not cover). Built like jail-exec; placed on the read-only root.
 gcc -static -O2 -Wall -Wextra -Werror -o "$OUT/jit-probe" "$ROOT/guest/jit-probe.c"
+# The tool shell: /bin/bash is a launcher that loads a W^X seccomp filter and execs /bin/bash.real, so
+# a Bash tool command (and anything it starts) can't run the Bun runtime or any other JIT. init starts
+# the agent's own shell and Claude Code through bash.real. See guest/tool-shell.c.
+gcc -static -O2 -Wall -Wextra -Werror -o "$OUT/tool-shell" "$ROOT/guest/tool-shell.c"
 
 stage="$WORK/rootfs-agent-stage"
 rm -rf "$stage"
@@ -66,7 +70,8 @@ copy_libs() {  # copy every shared library (and the loader) a binary needs, at t
   done
 }
 cp "$bb" "$stage/bin/busybox";           copy_libs "$bb"
-cp "$bash_bin" "$stage/bin/bash";        copy_libs "$bash_bin"
+cp "$bash_bin" "$stage/bin/bash.real";   copy_libs "$bash_bin"
+cp "$OUT/tool-shell" "$stage/bin/bash"
 cp "$socat_bin" "$stage/usr/bin/socat";  copy_libs "$socat_bin"
 cp "$claude_bin" "$stage/usr/local/bin/claude"; copy_libs "$claude_bin"
 cp "$OUT/jail-exec" "$stage/bin/jail-exec"
@@ -96,6 +101,47 @@ EOF
 printf '127.0.0.1 localhost\n::1 localhost\n' > "$stage/etc/hosts"
 echo agent > "$stage/etc/hostname"
 
+# Claude Code's managed settings, on the read-only root: the one settings source the agent can't edit.
+# /home/agent/.claude/settings.json and /home/agent/.claude.json are the agent's own files on the scratch
+# drive, so hooks, permission rules or MCP servers written there would be the agent widening its own
+# policy. Managed settings take precedence over them: hooks from any other source are blocked
+# (allowManagedHooksOnly), bypass-permissions mode is refused, WebFetch/WebSearch are denied outright (the
+# proxy refuses them anyway, but as a 403 Claude Code shows as a login error), and managed-mcp.json with
+# no servers means no MCP server can be configured from any user or project file. Permission rules stay
+# with the host (--allowedTools in headless mode, the prompt in interactive mode), so
+# allowManagedPermissionRulesOnly is NOT set: it would ignore --allowedTools too. What remains: the agent
+# can still add permissions.allow to its own settings. None of the kernel-enforced walls (jail-exec,
+# noexec, the proxy) depend on any of this; it keeps the Claude Code policy layer the operator's.
+# The SessionStart hook is a control: it writes a marker when Claude Code has loaded these settings and
+# run a managed hook, so after a run init can report MANAGED-HOOKS=fired. Without it, a user hook that
+# never fires could mean "blocked by allowManagedHooksOnly" or "managed settings never loaded". The
+# marker is in the agent's /tmp, so it shows that the settings loaded, not that the agent is honest.
+mkdir -p "$stage/etc/claude-code"
+cat > "$stage/etc/claude-code/managed-settings.json" <<'EOF'
+{
+  "allowManagedHooksOnly": true,
+  "permissions": {
+    "disableBypassPermissionsMode": "disable",
+    "deny": ["WebFetch", "WebSearch"]
+  },
+  "hooks": {
+    "SessionStart": [
+      {"hooks": [{"type": "command", "command": "/bin/touch /tmp/.claude-managed-hooks"}]}
+    ]
+  }
+}
+EOF
+printf '{"mcpServers":{}}\n' > "$stage/etc/claude-code/managed-mcp.json"
+
+# Puts the caller into the agent's cgroup (set up by init), then execs the rest: jail-exec, which drops
+# privileges. Root-only: cgroupfs is root-owned and the agent's Landlock ruleset has no write rule on /sys.
+cat > "$stage/bin/agent-cgroup" <<'EOF'
+#!/bin/sh
+echo $$ > /sys/fs/cgroup/agent/cgroup.procs || { echo "agent-cgroup: can't join the agent cgroup" >&2; exit 127; }
+exec "$@"
+EOF
+chmod 755 "$stage/bin/agent-cgroup"
+
 cat > "$stage/init" <<EOF
 #!/bin/sh
 # Agent VM init. Kernel cmdline key=value params arrive as env vars: agent_mode, agent_exec, agent_strace, agent_rows, agent_cols, agent_term.
@@ -107,6 +153,16 @@ fail() { echo "AGENT-EXIT=init: $*"; reboot -f; }
 # hidepid=invisible: the agent sees only its own processes, not init, socat or other uids.
 mount -t proc -o nosuid,nodev,noexec,hidepid=invisible proc /proc || fail "mount /proc"
 mount -t sysfs -o ro,nosuid,nodev,noexec sys /sys || fail "mount /sys"
+# The agent's cgroup: memory and pids bounded inside the guest as well, so a runaway agent is killed as a
+# group (memory.oom.group) before the guest OOM killer has to choose, and init and the bridge keep running
+# to report AGENT-EXIT and the denials. The outer limits are the VM's (2 GiB, 2 vCPUs, the fixed-size
+# drives) and the host cgroup around Firecracker. /bin/agent-cgroup moves the agent in before jail-exec.
+mount -t cgroup2 -o nosuid,nodev,noexec cgroup2 /sys/fs/cgroup || fail "mount cgroup2"
+echo "+memory +pids" > /sys/fs/cgroup/cgroup.subtree_control || fail "cgroup controllers"
+mkdir /sys/fs/cgroup/agent || fail "cgroup agent"
+echo 1536M > /sys/fs/cgroup/agent/memory.max || fail "cgroup memory.max"
+echo 1 > /sys/fs/cgroup/agent/memory.oom.group || fail "cgroup oom.group"
+echo 512 > /sys/fs/cgroup/agent/pids.max || fail "cgroup pids.max"
 # The kernel mounts devtmpfs on /dev itself (DEVTMPFS_MOUNT); remount it nosuid,noexec.
 mount -o remount,nosuid,noexec /dev || fail "remount /dev"
 # Kernel log: dmesg_restrict and Landlock already refuse the agent; the node itself root-only as well.
@@ -118,6 +174,9 @@ mkdir -p /dev/pts && mount -t devpts -o nosuid,noexec,mode=620,ptmxmode=666 devp
 wx=noexec; [ "$agent_exec" = 1 ] && wx=exec
 mount -t tmpfs -o nosuid,nodev,$wx,mode=1777,size=256m tmp /tmp || fail "mount /tmp"
 mount -t ext4 -o nosuid,nodev,$wx /dev/vdb /home/agent || fail "mount scratch drive /dev/vdb"
+# agent_exec=1 lifts the tool shells' W^X filter too (a workload that builds and runs code may need a
+# JIT in a tool shell): the real bash over the launcher, a bind mount since the root is read-only.
+[ "$agent_exec" = 1 ] && { mount -o bind /bin/bash.real /bin/bash || fail "bind bash.real"; }
 hostname agent
 ip link set lo up || fail "loopback"
 [ "$agent_mode" = headless ] && echo 1 > /proc/sys/kernel/printk
@@ -141,7 +200,7 @@ done
 cd /home/agent
 umask 077   # inherited by the agent: files it creates are private to it
 # The agent's jail, used for the agent and for the self-test alike so the test sees the real policy.
-JAIL="/bin/jail-exec --rw /home/agent --rw /tmp --connect 8080 $AGENT_UID"
+JAIL="/bin/agent-cgroup /bin/jail-exec --rw /home/agent --rw /tmp --connect 8080 $AGENT_UID"
 set -- env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/agent USER=agent LOGNAME=agent SHELL=/bin/bash \
   TERM="${agent_term:-xterm-256color}" LANG=C.UTF-8 \
   ANTHROPIC_BASE_URL=http://127.0.0.1:8080 \
@@ -151,9 +210,9 @@ set -- env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/agent USER=agent LOGN
 if [ "$agent_mode" = selftest ]; then
   # make agent-test: hardening checks, no Claude Code, nothing forwarded upstream.
   echo "AGENT-START"
-  AGENT_UID=$AGENT_UID agent_exec=$agent_exec /bin/bash /bin/agent-selftest root; r1=$?
+  AGENT_UID=$AGENT_UID agent_exec=$agent_exec /bin/bash.real /bin/agent-selftest root; r1=$?
   env -i PATH=/usr/bin:/bin HOME=/home/agent AGENT_UID=$AGENT_UID agent_exec=$agent_exec \
-    $JAIL /bin/bash /bin/agent-selftest agent; r2=$?
+    $JAIL /bin/bash.real /bin/agent-selftest agent; r2=$?
   echo; echo "AGENT-EXIT=$((r1 + r2))"
 elif [ "$agent_mode" = headless ]; then
   # The task comes on its own read-only raw drive (/dev/vdc) that the host writes fresh each run: line 1
@@ -169,7 +228,7 @@ elif [ "$agent_mode" = headless ]; then
   # A process the agent leaves holding the pipe keeps sed waiting; TIMEOUT then ends the run as failed.
   set -o pipefail
   $T "$@" /usr/bin/env AGENT_TASK="$AGENT_TASK" AGENT_TOOLS="$AGENT_TOOLS" \
-    /bin/bash -c 'claude -p "$AGENT_TASK" --allowedTools "$AGENT_TOOLS" 2>&1' \
+    /bin/bash.real -c 'claude -p "$AGENT_TASK" --allowedTools "$AGENT_TOOLS" 2>&1' \
     </dev/null 2>&1 | sed 's/^/| /'
   rc=$?; set +o pipefail
   echo; echo "AGENT-EXIT=$rc"   # own line: claude may leave a terminal escape unterminated
@@ -183,9 +242,11 @@ else
     echo "agent VM: kernel $(uname -r), uid $AGENT_UID, root fs read-only, /home/agent and /tmp $wx"
     echo "run claude. exit powers the VM off."
     echo
-    exec $T "$@" /bin/bash -l' sh "$@" </dev/ttyS0 >/dev/ttyS0 2>&1 &
+    exec $T "$@" /bin/bash.real -l' sh "$@" </dev/ttyS0 >/dev/ttyS0 2>&1 &
   wait $!
 fi
+# Did Claude Code load the managed settings? Its managed SessionStart hook leaves this marker.
+[ "$agent_mode" = selftest ] || echo "MANAGED-HOOKS=$([ -e /tmp/.claude-managed-hooks ] && echo fired || echo not-fired)"
 # What the jails refused, from the kernel log (root only: dmesg_restrict). type=1326 is seccomp,
 # syscall=N the number; type=1423 is a Landlock denial.
 echo "DENIALS-BEGIN"; dmesg | grep -E 'type=(1326|1423)' | tail -n 50; echo "DENIALS-END"

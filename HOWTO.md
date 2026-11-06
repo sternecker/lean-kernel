@@ -370,15 +370,23 @@ Runs can overlap: each works in its own `out/runs/<id>/` (VM config, socket, scr
 trick, so the agent can't run a binary it wrote **to a file or a memfd**. `AGENT_EXEC=1 make agent` lifts the
 `noexec` mounts for workloads that build and run code.
 
-This does **not** stop the agent running native code it generates in anonymous memory at runtime, i.e. an
-in-process JIT: `mmap`/`mprotect` with `PROT_EXEC` are allowed (they have to be — Claude Code is a Bun
-executable and JavaScriptCore JITs JavaScript into executable memory to run at all), and no kernel option
-enforces userspace W^X. So `bun:ffi`'s TinyCC `cc()`, JSC itself, Python `ctypes`, V8 or LuaJIT could each
-execute runtime-generated native code, bypassing `noexec`/`memfd_noexec` entirely. The image already ships
-one such engine (Bun/JSC); adding Python, Node or a compiler widens it further, not opens it. `make agent-test`
-asserts this state explicitly (the "in-process JIT works" line) so the gap stays visible rather than assumed
-closed; `guest/jit-probe.c` is the probe. Closing it is not a seccomp tweak — it would mean a different
-mechanism and running the runtime without its JIT; see the note on limits below.
+This does **not** stop Claude Code's own process running native code it generates in anonymous memory at
+runtime, i.e. an in-process JIT: for that process `mmap`/`mprotect` with `PROT_EXEC` are allowed (they have to
+be — Claude Code is a Bun executable and JavaScriptCore JITs JavaScript into executable memory to run at all),
+and no kernel option enforces userspace W^X. `make agent-test` asserts this state explicitly (the "in-process
+JIT works" line) so the gap stays visible rather than assumed closed; `guest/jit-probe.c` is the probe.
+
+It **is** stopped for everything the agent runs through that process. `/bin/bash` in the image is a launcher
+(`guest/tool-shell.c`): it loads a seccomp filter that refuses `mmap` with `PROT_EXEC` and `MAP_ANONYMOUS` and
+any `mprotect`/`pkey_mprotect` with `PROT_EXEC`, then execs `/bin/bash.real`. Claude Code runs every Bash tool
+command through bash, so a tool shell and all its children inherit the filter, the real bash included: it can't
+run the Bun runtime (so no `claude` with a `NODE_OPTIONS` or `BUN_*` preload, and no `bun:ffi` TinyCC `cc()`),
+nor Python `ctypes`, V8 or LuaJIT. With the writable mounts, `/dev`, `/proc` and `/sys` all `noexec`, the only
+executable mappings left to a tool shell are files on the read-only root. init starts the agent's own shell and
+Claude Code through `bash.real`. `AGENT_EXEC=1` lifts this too (init bind-mounts the real bash over the launcher),
+since a workload that builds and runs code may need a JIT in a tool shell. `make agent-test` checks a tool shell
+runs, can't JIT, and can't shed the filter by exec'ing `bash.real`. What remains is the JIT the model can't feed
+arbitrary code into; closing that would mean running Claude Code without its JIT, see the note on limits below.
 
 What in-process native code does and does not buy an attacker: the agent already runs arbitrary logic as its
 own uid, so this is not a new privilege at the host boundary — the syscall set is seccomp-limited whether the
@@ -455,10 +463,45 @@ bounds it. These are all set per session:
   counted in the session summary.
 - **Idle connections:** one that sends nothing for 30 s is closed (`--idle-timeout`).
 - **The log:** every refused request is a line, so the log is rate-limited (a burst of 50, then 2 lines a second)
-  and capped at 5000 lines (`--max-log-lines`). Dropped lines are counted and reported.
-- **cgroup (jailed):** the proxy runs in its own, `lean-agent/<id>-proxy`, with 256 MiB of memory and 32 tasks
-  (`PROXY_MEM_MAX`, `PROXY_PIDS_MAX` in `/etc/lean-agent.conf`).
+  and capped at 5000 lines (`--max-log-lines`). Dropped lines are counted and reported. Lines are bounded in
+  bytes too: guest-chosen text in a refusal (a field name, a source type, a model) is cut to 64 characters and
+  any line to 1024, so a 32 MB field name is not a 32 MB log line.
+- **cgroup (jailed):** the proxy runs in its own, `lean-agent/<id>-proxy`, with 256 MiB of memory, 32 tasks and
+  one CPU (`PROXY_MEM_MAX`, `PROXY_PIDS_MAX`, `PROXY_CPU_MAX` in `/etc/lean-agent.conf`). The CPU cap matters
+  because a request is parsed before the budget and rate limit apply, so refused requests cost CPU that
+  nothing else counts.
+- **Firecracker's fds (jailed):** Firecracker never holds your terminal. Its stdin is a pipe from a relay that
+  reads the terminal as you, its stderr goes to `out/runs/<id>/firecracker.log` (shown stripped after the run),
+  and only its stdout, the serial console, reaches the console filter. A compromised VMM with the tty on fd 0 or 2
+  could otherwise write escape sequences past the filter, which only sees stdout.
 
+**Claude Code's own policy.** Claude Code reads settings from the agent's home, which the agent can write
+(`~/.claude/settings.json`, `~/.claude.json`), so hooks, permission rules and MCP servers put there would be the agent
+widening its own policy. The image carries managed settings on the read-only root, which take precedence:
+`/etc/claude-code/managed-settings.json` blocks hooks from any other source (`allowManagedHooksOnly`), refuses
+bypass-permissions mode and denies `WebFetch`/`WebSearch`, and `/etc/claude-code/managed-mcp.json` with no servers means
+no MCP server can be configured from a user or project file. Permission rules stay with the host (`TOOLS` becomes
+`--allowedTools`; interactive runs prompt), so `allowManagedPermissionRulesOnly` is deliberately not set: it would ignore
+`--allowedTools` too. The agent can still add `permissions.allow` to its own settings; nothing kernel-enforced depends on
+this layer. `make agent-test` checks the files are present, root-owned and readable by the agent.
+Whether the pinned Claude Code honors the key is only visible from a real session, so the managed file also carries a
+`SessionStart` hook that leaves a marker, and init reports `MANAGED-HOOKS=fired` or `not-fired` after the agent exits
+(headless runs print it as `managed settings: ...`). To test the lock itself, in an interactive run add a user-level
+hook to `~/.claude/settings.json` that writes a marker on `PreToolUse` for `Bash`, make one Bash call, and look: the
+managed marker present and yours absent means the key is honored; the managed marker absent means the managed settings
+did not load at all (check `claude doctor` or `/status` in the session). Settings reload live, so no restart is needed.
+
+**Sysctls pinned at boot** (`vm/vm.json.in`): `kptr_restrict=2`, `memfd_noexec=2`, `user.max_user_namespaces=0` (user
+namespaces are compiled out, but 6.18 shows the knob regardless, so it is pinned rather than left reading as "on"),
+and `fs.protected_symlinks/hardlinks=1`, `fs.protected_fifos/regular=2`. `make agent-test` asserts each, and that the
+agent's seccomp filter refuses `AF_VSOCK` and `AF_NETLINK` sockets (it allows `AF_UNIX`, `AF_INET`, `AF_INET6` only).
+The `CLAUDE_CODE_OAUTH_TOKEN` the agent sees is a placeholder; the real credential exists only in the host proxy.
+
+**Limits inside the guest.** init puts the agent in a cgroup, `/sys/fs/cgroup/agent`: 1.5 GiB of memory, killed as a
+group when exceeded (`memory.oom.group`), and 512 pids. Those are inner limits so a runaway agent dies before the guest OOM
+killer has to choose and init and the bridge survive to report the exit; the outer ones are the VM's 2 GiB, 2 vCPUs and
+fixed-size drives (512 MiB home, 256 MiB `/tmp`), and the host cgroup around Firecracker. cgroupfs is root-owned and
+`/sys` has no Landlock write rule, so the agent can't move itself out.
 Inside the guest, `jail-exec` caps the agent's uid at 512 processes and threads (`--nproc`, `RLIMIT_NPROC`), so a
 runaway agent can't starve init or the bridge, which run as other uids.
 
