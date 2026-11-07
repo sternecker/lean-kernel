@@ -6,6 +6,7 @@
 source "$(dirname "$0")/_env.sh"
 
 [[ -d "$SRC" ]] || die "kernel source missing; run make fetch"
+require_clang
 mkdir -p "$OUT"
 
 frags=("$ROOT/configs/lean.fragment")

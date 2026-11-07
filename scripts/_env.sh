@@ -16,16 +16,31 @@ JOBS="${JOBS:-$(nproc)}"
 
 # LLVM=1 (default) builds with clang + lld and adds llvm.fragment (CFI, RANDSTRUCT, KSTACK_ERASE).
 # LLVM=0 is the gcc build, which has none of those. Debian installs versioned LLVMs
-# (/usr/lib/llvm-N/bin) without unversioned clang/ld.lld on PATH, so use the newest one that has both.
+# (/usr/lib/llvm-N/bin) without unversioned clang/ld.lld on PATH, so use the newest one that has both;
+# LEAN_LLVM_DIR=<dir with clang and ld.lld> picks one explicitly. The RHEL family has them on PATH.
 LLVM="${LLVM:-1}"
 MAKE_TOOLCHAIN=()
-LLVM_DIR=""
+LLVM_DIR="${LEAN_LLVM_DIR:-}"
+[[ -n "$LLVM_DIR" ]] && LLVM_DIR="${LLVM_DIR%/}/"
 if [[ "$LLVM" == "1" ]]; then
-  for d in $(ls -d /usr/lib/llvm-*/bin 2>/dev/null | sort -t- -k2 -n -r); do
-    [[ -x "$d/clang" && -x "$d/ld.lld" ]] && { LLVM_DIR="$d/"; break; }
-  done
+  if [[ -z "$LLVM_DIR" ]]; then
+    for d in $(ls -d /usr/lib/llvm-*/bin 2>/dev/null | sort -t- -k2 -n -r); do
+      [[ -x "$d/clang" && -x "$d/ld.lld" ]] && { LLVM_DIR="$d/"; break; }
+    done
+  fi
   MAKE_TOOLCHAIN=(LLVM="${LLVM_DIR:-1}" LLVM_IAS=1)
 fi
+# clang_version: the first line of --version from the clang the build will use (LLVM_DIR, else PATH); empty if none.
+# clang_major: its major version. Matches "clang version 22.1.8" with or without a distro prefix.
+clang_version() { "${LLVM_DIR}clang" --version 2>/dev/null | head -n1 || true; }
+clang_major() { clang_version | grep -oE 'clang version [0-9]+' | awk '{print $3}' || true; }
+# require_clang: stop unless the LLVM build's clang is at least CLANG_MIN (pinned in VERSION). No-op for LLVM=0.
+require_clang() {
+  [[ "$LLVM" == "1" ]] || return 0
+  local v; v="$(clang_major)"
+  [[ -n "$v" ]] || die "clang not found${LLVM_DIR:+ in $LLVM_DIR}; make deps lists the packages, or LLVM=0 for the gcc build"
+  [[ "$v" -ge "$CLANG_MIN" ]] || die "clang $v is too old: the LLVM build needs clang >= $CLANG_MIN ($(clang_version)); install it, or LLVM=0 for the gcc build"
+}
 
 # Host distro family, decided before anything else runs: debian (Debian, Ubuntu, ...) or rhel (RHEL,
 # Fedora, CentOS Stream, Rocky, Alma, ...). It picks the package tool, the package-presence check and the

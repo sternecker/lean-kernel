@@ -27,14 +27,18 @@ sudo apt install flex bison libelf-dev libssl-dev
 sudo apt install clang-22 lld-22      # the default clang build; both are in trixie main
 ```
 
-Use the versioned packages: plain `clang lld` installs 19, which can't build `KSTACK_ERASE`.
+Use the versioned packages: plain `clang lld` installs 19, which can't build `KSTACK_ERASE`. The LLVM build
+needs clang >= 22 (`CLANG_MIN` in `VERSION`, the version the configs and checker results were verified with);
+`make deps` reports an older one and `make config` / `make build` stop on it. With several LLVMs installed the
+scripts take the newest `/usr/lib/llvm-N`; `LEAN_LLVM_DIR=/usr/lib/llvm-22/bin` picks one explicitly.
 `LLVM=0` builds with gcc and needs only the first line, but loses CFI, RANDSTRUCT and KSTACK_ERASE.
 
 `make deps` tells you what's still missing and prints the apt line. Every make target first checks the host's
 distro family from `/etc/os-release` (`make distro` shows the result) and stops on anything that is not Debian-
 or RHEL-family; `LEAN_DISTRO=debian|rhel` forces one. On the RHEL family (Fedora, CentOS Stream, Rocky, Alma)
 `make deps` prints the `dnf` line with that family's package names (`elfutils-libelf-devel`, `openssl-devel`,
-unversioned `clang lld`), but the build itself is only exercised on Debian 13.
+unversioned `clang lld`). CentOS Stream 10 and RHEL 10 ship clang 22.1.8, which meets the minimum; older
+releases need a newer `llvm-toolset` or `LLVM=0`. The build is exercised on Debian 13 and CentOS Stream 10.
 
 ## 2. Configure
 

@@ -16,6 +16,10 @@ CLAUDE_CODE_SHA256=fd13c70000fec3f2116dfbcbb6121210b4a29328bf0e46210a59dd594a67d
 # Bump deliberately: review the diff, set the new commit, rerun make check.
 KHC_URL=https://github.com/a13xp0p0v/kernel-hardening-checker
 KHC_COMMIT=b2acfd4f8fba4e91996224b29c992cf83be30904
+# Minimum clang major for the default LLVM build. KSTACK_ERASE needs >= 20; the shipped configs, the checker
+# results and the probe were verified with 22 (Debian 13 clang-22, CentOS Stream 10 / RHEL 10 clang 22.1.8).
+# make deps reports anything older, make config and make build stop on it. LLVM=0 (gcc) does not use it.
+CLANG_MIN=22
 BASE_CONFIG=configs/base-firecracker-x86_64-6.18.config
 BASE_CONFIG_SRC=https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/resources/guest_configs/microvm-kernel-ci-x86_64-6.18.config
 BASE_CONFIG_FETCHED=2026-10-23

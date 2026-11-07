@@ -9,6 +9,7 @@ echo "family: $DISTRO_FAMILY${LEAN_DISTRO:+ (forced by LEAN_DISTRO)}"
 echo "packages: $PKG_INSTALL ..."
 [[ "$(uname -m)" == x86_64 ]] || die "x86_64 host required (this is $(uname -m))"
 if [[ "$DISTRO_FAMILY" == rhel ]]; then
-  echo "note: RHEL-family support is package-name mapping only; the build is exercised on Debian 13."
-  echo "      Fedora ships unversioned clang/lld; RHEL needs clang >= 20 for KSTACK_ERASE, or LLVM=0 for the gcc build."
+  echo "note: the build is exercised on Debian 13 and CentOS Stream 10; other RHEL-family hosts get package-name mapping only."
+  echo "      The RHEL family ships unversioned clang/lld; the LLVM build needs clang >= $CLANG_MIN (CentOS Stream 10 /"
+  echo "      RHEL 10 ship 22; older releases need a newer llvm-toolset), or LLVM=0 for the gcc build."
 fi

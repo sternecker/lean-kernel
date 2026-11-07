@@ -69,6 +69,11 @@
 #define PR_SET_MDWE 65
 #define PR_MDWE_REFUSE_EXEC_GAIN (1UL << 0)
 #endif
+// Landlock ABI 7 (6.15); absent from the 6.12-based headers on CentOS Stream 10 / RHEL 10. Only used
+// when the running kernel reports ABI >= 7, so the fallback is just the uapi value.
+#ifndef LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON
+#define LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON (1U << 1)
+#endif
 
 // EPERM, checked first: an explicit "no" for calls the kernel can't cut, cross-process access, and
 // root-only administration kept as defense in depth in case the agent ever holds a capability.
