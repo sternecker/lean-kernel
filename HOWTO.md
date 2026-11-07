@@ -377,9 +377,16 @@ and no kernel option enforces userspace W^X. `make agent-test` asserts this stat
 JIT works" line) so the gap stays visible rather than assumed closed; `guest/jit-probe.c` is the probe.
 
 It **is** stopped for everything the agent runs through that process. `/bin/bash` in the image is a launcher
-(`guest/tool-shell.c`): it loads a seccomp filter that refuses `mmap` with `PROT_EXEC` and `MAP_ANONYMOUS` and
-any `mprotect`/`pkey_mprotect` with `PROT_EXEC`, then execs `/bin/bash.real`. Claude Code runs every Bash tool
-command through bash, so a tool shell and all its children inherit the filter, the real bash included: it can't
+(`guest/tool-shell.c`): it sets `prctl(PR_SET_MDWE, PR_MDWE_REFUSE_EXEC_GAIN)`, the kernel's
+Memory-Deny-Write-Execute (6.3+), which refuses every new writable-and-executable mapping whatever backs it and
+any mapping gaining `PROT_EXEC`, checked at the VMA rather than the syscall, inherited across fork and exec and
+impossible to turn off; then, as a backstop, a seccomp filter that refuses `mmap` with `PROT_EXEC` plus
+`MAP_ANONYMOUS` or `PROT_WRITE` and any `mprotect`/`pkey_mprotect` with `PROT_EXEC`; then it execs
+`/bin/bash.real`. (The seccomp filter alone, which is what the launcher had before 2026-11-07, could be
+bypassed with a `MAP_PRIVATE` read-write-exec mapping of any readable file: not `MAP_ANONYMOUS`, so it passed,
+and copy-on-write made the pages private executable memory. `jit-probe` now tries that path and `make
+agent-test` expects it refused.) Claude Code runs every Bash tool
+command through bash, so a tool shell and all its children inherit the policy, the real bash included: it can't
 run the Bun runtime (so no `claude` with a `NODE_OPTIONS` or `BUN_*` preload, and no `bun:ffi` TinyCC `cc()`),
 nor Python `ctypes`, V8 or LuaJIT. With the writable mounts, `/dev`, `/proc` and `/sys` all `noexec`, the only
 executable mappings left to a tool shell are files on the read-only root. init starts the agent's own shell and

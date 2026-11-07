@@ -123,8 +123,9 @@ posture visible, they don't certify it.
   protection covers only file- and memfd-based exec there. It can't be closed for that process, because Claude
   Code is a Bun/JavaScriptCore JIT and needs anonymous executable memory to run JavaScript at all; closing it
   means a different mechanism and a no-JIT runtime. It is closed for everything the agent runs *through* that
-  process: `/bin/bash` in the image is a launcher (`guest/tool-shell.c`) that loads a W^X seccomp filter and
-  execs the real bash, so a Bash tool command and all its children can't run the Bun runtime (no `claude`
+  process: `/bin/bash` in the image is a launcher (`guest/tool-shell.c`) that sets `PR_SET_MDWE` (the kernel's
+  Memory-Deny-Write-Execute: no W+X mapping of any kind, no mapping gaining exec, inherited and irrevocable)
+  plus a seccomp W^X backstop, then execs the real bash, so a Bash tool command and all its children can't run the Bun runtime (no `claude`
   with a `NODE_OPTIONS`/`BUN_*` preload, no `bun:ffi` TinyCC) or any other JIT. What's left is the JIT the
   model can't feed arbitrary code into. `guest/jit-probe.c` + `make agent-test` assert both halves.
   The practical impact is kernel-syscall surface, not a new host-boundary privilege (see HOWTO §9.5).

@@ -31,8 +31,10 @@ CASES = [
     (f"{E}]1337;File=x\x07{E}]777;notify;a;b\x07", ""),
     # DCS / APC / PM / SOS dropped
     (f"a{E}P$qm{ST}b{E}_Gf=100;AAAA{ST}c{E}^pm{ST}d", "abcd"),
-    # window ops: title reports, moves and resizes dropped; size reports and title stack kept
-    (f"{E}[21t{E}[20t{E}[3;0;0t{E}[8;999;999t{E}[18t{E}[22;0t{E}[>2t", f"{E}[18t{E}[22;0t"),
+    # window ops: title reports, moves, resizes and title push/pop dropped; size reports kept
+    (f"{E}[21t{E}[20t{E}[3;0;0t{E}[8;999;999t{E}[18t{E}[22;0t{E}[23;0t{E}[>2t", f"{E}[18t"),
+    # private modes: VT52 (?2) and 132 columns (?3) dropped in any position; other modes kept
+    (f"{E}[?2l{E}[?3h{E}[?1;3l{E}[?2;25h{E}[?1h{E}[?25l{E}[?1049h{E}[4h{E}[2h", f"{E}[?1h{E}[?25l{E}[?1049h{E}[4h{E}[2h"),
     (f"{E}[5i{E}[?4i", ""),
     # an OSC cut short by another ESC is dropped, and the new sequence is parsed
     (f"{E}]2;x{E}]52;c;Zm9v\x07ok", "ok"),
@@ -84,6 +86,16 @@ for _ in range(20000):
     if any(ch in out for ch in "\x00\x18\x9b\x9c\x9d‮"):
         failed += 1
         print(f"FAIL fuzz control {s!r} -> {out!r}")
+
+# START/RESET bracket the session: title pushed, then popped; the soft reset and scroll region reset are
+# in RESET, and nothing in RESET is a sequence the filter itself would drop.
+if cf.START != f"{E}[22;0t" or not cf.RESET.endswith(f"{E}[23;0t") or f"{E}[!p" not in cf.RESET or f"{E}[r" not in cf.RESET:
+    failed += 1
+    print("FAIL START/RESET title push/pop or soft reset missing")
+for seq in (f"{E}[>4;0m", f"{E}[20l", f"{E}[?1l", f"{E}>", f"{E}[?1049l", f"{E}[?25h"):
+    if seq not in cf.RESET:
+        failed += 1
+        print(f"FAIL RESET lacks {seq!r}")
 
 print("console-filter: ok" if not failed else f"console-filter: {failed} failed")
 sys.exit(1 if failed else 0)

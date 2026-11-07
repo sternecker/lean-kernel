@@ -125,8 +125,14 @@ def _tool_why(t):
     return None
 
 
+# Keys whose value is a JSON Schema (a client tool's input_schema, output_format's schema): a schema may
+# legitimately describe a property called "source" with a "type", and the server never fetches anything
+# from a schema, so these subtrees are not walked. Everything else in the request is.
+SCHEMA_KEYS = frozenset({"input_schema", "schema"})
+
+
 def _walk(v, depth=0):
-    """Return a reason if any nested content block in v points the server at something to fetch."""
+    """Return a reason if anything nested in v points the server at something to fetch."""
     if depth > MAX_DEPTH:
         return "body nested too deeply"
     if isinstance(v, list):
@@ -152,10 +158,10 @@ def _walk(v, depth=0):
             if why:
                 return why
         # A tool call's arguments are the agent's own JSON, not content blocks: a parameter that
-        # happens to be called "source" there means nothing to the server.
+        # happens to be called "source" there means nothing to the server. Schemas likewise.
         skip = "input" if v.get("type") in ("tool_use", "server_tool_use") else None
         for k, x in v.items():
-            if k == skip:
+            if k == skip or k in SCHEMA_KEYS:
                 continue
             why = _walk(x, depth + 1)
             if why:
@@ -203,9 +209,10 @@ def body_policy(body):
         why = _tool_why(t)
         if why:
             return why, req
-    # Sources and tool definitions anywhere in the content: messages, tool_result content, documents
-    # nested in documents, system blocks. Not the top-level tools: an input_schema is a schema, never fetched.
-    why = _walk(req.get("messages")) or _walk(req.get("system"))
+    # Sources and tool definitions anywhere in the request, not just in messages and system: a field that
+    # grows a place for a content block later is covered without anyone noticing it first. Only schemas
+    # (SCHEMA_KEYS) and tool-call arguments are skipped.
+    why = _walk(req)
     if why:
         return why, req
     return None, req

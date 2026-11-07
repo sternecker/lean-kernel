@@ -103,6 +103,19 @@ for b, ok, what in [
      True, "tool added by reference"),
     (body(messages=[{"role": "system", "content": [{"type": "tool_removal", "tool": {"type": "tool_reference", "name": "Bash"}}]}]),
      True, "tool removed by reference"),
+    # The whole request is walked, not only messages and system; schemas are the one place a "source"
+    # property is just a property.
+    (body(context_management={"edits": [{"type": "x", "source": {"type": "url", "url": "https://x/"}}]}),
+     False, "url source outside messages"),
+    (body(tools=[{"name": "t", "input_schema": {"type": "object", "properties": {"source": {"type": "string"}}}}]),
+     True, "client tool schema with a source property"),
+    (body(output_format={"type": "json_schema", "schema": {"properties": {"source": {"type": "url"}}}}),
+     True, "output schema with a source property"),
+    (body(messages=[{"role": "user", "content": "hi"}, add({"name": "t", "input_schema": {"properties": {"source": {"type": "string"}}}})]),
+     True, "added client tool schema with a source property"),
+    (body(messages=[{"role": "assistant", "content": [{"type": "tool_use", "id": "t", "name": "x",
+                                                       "input": {"source": {"type": "url", "url": "https://x/"}}}]}]),
+     True, "url inside tool_use input is the agent's own argument"),
     (body(thread={"type": "continue", "previous_message_id": "msg_other"}), False, "thread continue"),
     (body(diagnostics={"previous_message_id": "msg_other"}), False, "diagnostics"),
 ]:

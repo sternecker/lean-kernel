@@ -10,7 +10,9 @@ differently than we did. Sequences split across reads are held until they comple
 Passed:
   - printable text, TAB, LF, CR, BS, BEL
   - CSI sequences (cursor, SGR colours, modes, mouse and keyboard protocols, numeric queries), except
-    window operations (CSI t) other than size reports and title push/pop, and media copy (CSI i)
+    window operations (CSI t) other than size reports, media copy (CSI i), and the private modes that
+    change how the terminal parses everything after them (DECANM ?2: VT52 mode) or resize the window
+    (DECCOLM ?3: 132 columns)
   - two-character ESC sequences (ESC 7, ESC =, ESC ( B, ...)
   - OSC 0/1/2 (window title), with control and bidi characters removed from the title
   - OSC 10/11/12 ;? (foreground/background/cursor colour queries; the reply holds only colour values)
@@ -20,12 +22,16 @@ Dropped:
     7 (cwd), 9/99/777 (notifications), 133, 1337 (iTerm2), ...
   - DCS, APC, PM and SOS strings (DECRQSS, sixel, kitty graphics, tmux passthrough, ...)
   - CSI 20 t / 21 t (title reports: the reply would echo guest-chosen text into the terminal's input),
-    and window moves, resizes, raises and iconify
+    window moves, resizes, raises and iconify, and title push/pop (22/23 t: this filter brackets the
+    session with its own push and pop, so the title the guest set is gone when the run ends)
   - other C0 controls, DEL, C1 controls (8-bit CSI/OSC/DCS included) and the bidi/format characters
     that reorder or hide text (U+061C, U+200B-U+200F except U+200D, U+202A-U+202E, U+2066-U+2069, U+FEFF)
 
-At end of input it resets terminal state the guest may have left behind: attributes, character set,
-alternate screen, hidden cursor, mouse and focus reporting, bracketed paste, kitty keyboard flags.
+At start it pushes the terminal's title (CSI 22 t). At end of input it pops it back and resets terminal
+state the guest may have left behind: a soft reset (DECSTR: scroll region, insert, origin and autowrap
+modes, cursor keys, keypad, attributes, cursor visible), then explicitly the scroll region, attributes,
+character set, newline mode, modifyOtherKeys, cursor keys and keypad (for terminals without DECSTR),
+alternate screen, hidden cursor, mouse and focus reporting, bracketed paste and kitty keyboard flags.
 """
 import codecs
 import os
@@ -41,12 +47,23 @@ UNSAFE_CHAR = re.compile(f"[{UNSAFE}\x07-\x0a\x0d]")  # for titles: no controls 
 
 MAX_CSI = 128    # longest CSI kept; longer ones are dropped (truecolour SGR is ~40)
 MAX_OSC = 512    # longest OSC payload kept; longer ones are dropped (titles are short)
-# CSI Ps t window operations that only report sizes (numbers) or push/pop the title stack.
-WINOPS_OK = {"14", "16", "18", "22", "23"}
+# CSI Ps t window operations that only report sizes (numbers). Not 22/23 (title push/pop): the filter
+# owns the title stack for the session (START/RESET below), and a guest pop would unbalance it.
+WINOPS_OK = {"14", "16", "18"}
+# DECSET/DECRST private modes dropped whatever the final byte: 2 (DECANM: ?2l puts xterm into VT52 mode, a
+# different parser, after which nothing below resets it) and 3 (DECCOLM: resizes to 132/80 columns and
+# clears the screen).
+MODES_DENY = {"2", "3"}
 
+START = "\x1b[22;0t"   # push the icon name and title; RESET pops them
 RESET = (
+    "\x1b[!p"        # DECSTR soft reset: scroll region, insert/origin/autowrap, cursor keys, keypad, SGR, cursor
+    "\x1b[r"         # scroll region (again, for terminals without DECSTR)
     "\x1b[0m"        # attributes
     "\x1b(B"         # G0 = ASCII (undo ESC ( 0 line drawing)
+    "\x1b[20l"       # newline mode off (LNM is not in DECSTR)
+    "\x1b[>4;0m"     # modifyOtherKeys off (xterm; not in DECSTR)
+    "\x1b[?1l\x1b>"  # normal cursor keys, numeric keypad (for terminals without DECSTR)
     "\x1b[?2026l"    # synchronized output off
     "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l"  # mouse reporting off
     "\x1b[?1004l"    # focus reporting off
@@ -54,6 +71,7 @@ RESET = (
     "\x1b[<99u"      # pop kitty keyboard protocol flags
     "\x1b[?1049l"    # back to the main screen
     "\x1b[?25h"      # cursor visible
+    "\x1b[23;0t"     # pop the title saved by START
 )
 
 GROUND, ESCAPE, ESC_INTER, CSI, OSC, OSC_ESC, STRING, STRING_ESC, DISCARD = range(9)
@@ -173,6 +191,8 @@ class Filter:
                 return
             if params.split(";")[0] not in WINOPS_OK:
                 return
+        if final in "hl" and params[:1] == "?" and MODES_DENY & set(params[1:].split(";")):
+            return
         out.append(ESC + "[" + body + final)
 
     @staticmethod
@@ -299,6 +319,7 @@ def main():
     except OSError as e:
         sys.exit(f"console-filter: {e}; not running without the seccomp filter")
     try:
+        write_all(1, START.encode("utf-8"))
         while True:
             chunk = os.read(0, 65536)
             if not chunk:

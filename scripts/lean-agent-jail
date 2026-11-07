@@ -264,6 +264,18 @@ cleanup() {
   # The stdin relay sits in read() on the terminal; left behind, it would eat the owner's next keystrokes.
   [[ -n "$relay" ]] && { kill "$relay" 2>/dev/null || true; wait "$relay" 2>/dev/null || true; }
   [[ -n "$proxy" ]] && { kill "$proxy" 2>/dev/null || true; wait "$proxy" 2>/dev/null || true; }
+  # Before root touches anything under $run (the copy-back and the removal below), nothing of this run
+  # may still be running: children a compromised VMM managed to leave behind could otherwise race root's
+  # path walks in a tree their uid owns. The cgroups first (every process of the run, whatever its uid),
+  # then the uid itself, then wait for the kills to land.
+  local cg
+  for cg in "/sys/fs/cgroup/$CG_PARENT/$id" "/sys/fs/cgroup/$CG_PARENT/$id-proxy"; do
+    [[ -f "$cg/cgroup.kill" ]] && { echo 1 > "$cg/cgroup.kill" 2>/dev/null || true; }
+  done
+  if [[ -n "$fc_claim" ]]; then
+    pkill -KILL -u "$fc_uid" 2>/dev/null || true
+    for _ in 1 2 3 4 5 6 7 8 9 10; do pgrep -u "$fc_uid" >/dev/null 2>&1 || break; sleep 0.1; done
+  fi
   # Keep the agent's home: copy the scratch drive back to the run directory. Once Firecracker
   # has run, everything under $jail is its uid's: read it as that uid, never as root, or a swapped-in
   # symlink would make root copy out a file Firecracker's uid can't read.
@@ -276,10 +288,7 @@ cleanup() {
   [[ -d "/sys/fs/cgroup/$CG_PARENT/$id-proxy" ]] && rmdir "/sys/fs/cgroup/$CG_PARENT/$id-proxy" 2>/dev/null || true
   [[ "$run" == "$BASE/firecracker/agent-"* ]] && rm -rf -- "$run"
   # Release the uid last, once nothing of this run is left that it owns.
-  if [[ -n "$fc_claim" ]]; then
-    pkill -KILL -u "$fc_uid" 2>/dev/null || true
-    rm -f -- "$fc_claim"
-  fi
+  [[ -n "$fc_claim" ]] && rm -f -- "$fc_claim"
   exit "$rc"
 }
 trap cleanup EXIT

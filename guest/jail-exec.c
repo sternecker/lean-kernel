@@ -3,11 +3,17 @@
 //
 // Usage: jail-exec [--rw PATH]... [--connect PORT]... [--bind PORT]... [--vsock] UID COMMAND [ARGS...]
 //   --rw PATH       Landlock: full access beneath PATH. Everything else is read and execute only,
-//                   except /dev, where only null, zero, full, random, urandom, tty, ptmx, /dev/pts and
-//                   the terminal on fds 0-2 can be opened (read, write, ioctl). Not kmsg, hwrng, disks.
+//                   except /dev, where only null, zero, full, random, urandom, ptmx and /dev/pts can be
+//                   opened (read, write, ioctl), plus the terminal on fds 0-2 and /dev/tty when one of
+//                   fds 0-2 is a terminal. Not kmsg, hwrng, disks, and never the serial console by name:
+//                   a headless agent (fds: /dev/null and pipes) has no path to the console at all, which
+//                   is what keeps the "| " prefix on its output honest (mkrootfs-agent.sh init).
 //   --connect PORT  Landlock: TCP connect to PORT allowed. No other TCP connects.
 //   --bind PORT     Landlock: TCP bind/listen on PORT allowed. No other TCP binds.
 //   --vsock         seccomp: allow AF_VSOCK sockets (the host bridge needs them, the agent doesn't).
+//   --mdwe          prctl(PR_SET_MDWE): no writable-and-executable memory, no mapping gaining exec, for
+//                   the command and everything it starts (inherited, irrevocable). For programs that
+//                   don't JIT (the bridge); not for the agent, which is a JIT (NOTES section 5).
 //   --nproc N       processes and threads the uid may have (RLIMIT_NPROC, default 512), so a runaway
 //                   agent can't exhaust the guest for init and the bridge, which run as other uids.
 //
@@ -18,7 +24,8 @@
 //   3. Landlock (ABI >= 6 required): the filesystem and TCP rules above, plus scoping, so the agent
 //      can't signal or reach abstract unix sockets of processes outside its own domain (init, socat)
 //   4. close every inherited fd above 2
-//   5. seccomp: non-x86_64 and x32 calls kill the process; the explicit denylist returns EPERM;
+//   5. with --mdwe, PR_SET_MDWE (Memory-Deny-Write-Execute)
+//   6. seccomp: non-x86_64 and x32 calls kill the process; the explicit denylist returns EPERM;
 //      clone with namespace flags EPERM; clone3 ENOSYS (glibc falls back to clone); socket() only
 //      for AF_UNIX/AF_INET/AF_INET6 (+AF_VSOCK with --vsock); then the allowlist; anything else
 //      returns ENOSYS. Refused calls are logged to the kernel log (SECCOMP_FILTER_FLAG_LOG,
@@ -57,6 +64,10 @@
 #endif
 #ifndef AF_VSOCK
 #define AF_VSOCK 40
+#endif
+#ifndef PR_SET_MDWE
+#define PR_SET_MDWE 65
+#define PR_MDWE_REFUSE_EXEC_GAIN (1UL << 0)
 #endif
 
 // EPERM, checked first: an explicit "no" for calls the kernel can't cut, cross-process access, and
@@ -235,16 +246,24 @@ static int add_root_except_dev(int ruleset)
 static int add_dev(int ruleset)
 {
 	static const char *const nodes[] = { "/dev/null", "/dev/zero", "/dev/full", "/dev/random",
-					     "/dev/urandom", "/dev/tty", "/dev/ptmx", "/dev/pts" };
+					     "/dev/urandom", "/dev/ptmx", "/dev/pts" };
 	int bad = 0;
 	for (size_t i = 0; !bad && i < sizeof nodes / sizeof *nodes; i++)
 		bad = add_path_opt(ruleset, nodes[i], FS_DEV | FS_READ, 1);
-	// The terminal the agent was started on (the serial console), so /dev/stderr and friends work.
+	// The terminal the agent was started on (the serial console, interactive mode), so /dev/stderr and
+	// friends work, and with it /dev/tty, the controlling-terminal alias. Neither is granted when no fd
+	// is a terminal (headless mode): /dev/tty would then only ever fail with ENXIO, but a rule for it is
+	// a standing grant that a future init change could turn into a path to the console.
+	int on_tty = 0;
 	for (int fd = 0; !bad && fd <= 2; fd++) {
 		char *t = isatty(fd) ? ttyname(fd) : NULL;
-		if (t)
+		if (t) {
+			on_tty = 1;
 			bad = add_path_opt(ruleset, t, FS_DEV, 1);
+		}
 	}
+	if (!bad && on_tty)
+		bad = add_path_opt(ruleset, "/dev/tty", FS_DEV | FS_READ, 1);
 	return bad;
 }
 
@@ -264,7 +283,7 @@ static int add_port(int ruleset, long port, __u64 access)
 struct policy {
 	const char *rw[MAX_RULES];
 	long connect[MAX_RULES], bind[MAX_RULES];
-	int nrw, nconnect, nbind, vsock;
+	int nrw, nconnect, nbind, vsock, mdwe;
 	long nproc;
 };
 
@@ -315,7 +334,7 @@ static long parse_num(const char *s, long lo, long hi)
 
 static int usage(void)
 {
-	fprintf(stderr, "usage: jail-exec [--rw PATH]... [--connect PORT]... [--bind PORT]... [--vsock] UID COMMAND [ARGS...]\n");
+	fprintf(stderr, "usage: jail-exec [--rw PATH]... [--connect PORT]... [--bind PORT]... [--vsock] [--mdwe] [--nproc N] UID COMMAND [ARGS...]\n");
 	return 127;
 }
 
@@ -327,6 +346,10 @@ int main(int argc, char **argv)
 		const char *o = argv[i];
 		if (strcmp(o, "--vsock") == 0) {
 			p.vsock = 1;
+			continue;
+		}
+		if (strcmp(o, "--mdwe") == 0) {
+			p.mdwe = 1;
 			continue;
 		}
 		if (i + 1 >= argc)
@@ -429,7 +452,12 @@ int main(int argc, char **argv)
 		perror("jail-exec: close_range");
 		return 127;
 	}
-	// 5.
+	// 5. W^X for programs that don't need to JIT: checked at the VMA by the kernel, inherited, irrevocable.
+	if (p.mdwe && prctl(PR_SET_MDWE, PR_MDWE_REFUSE_EXEC_GAIN, 0, 0, 0)) {
+		perror("jail-exec: PR_SET_MDWE");
+		return 127;
+	}
+	// 6.
 	if (install_filter(p.vsock)) {
 		perror("jail-exec: seccomp");
 		return 127;

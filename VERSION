@@ -1,10 +1,10 @@
 # Pinned versions. Bump here, then: make deps fetch config build check
 KERNEL_SERIES=6.18
-KERNEL_VERSION=6.18.60
+KERNEL_VERSION=6.18.62
 KERNEL_URL=https://cdn.kernel.org/pub/linux/kernel/v6.x
 # sha256 of linux-$KERNEL_VERSION.tar.xz. On a bump: scripts/fetch-kernel.sh --pin prints it (checked against
 # kernel.org's signed sha256sums.asc when gpg has the autosigner key).
-KERNEL_SHA256=3c2f44ef6acc021a7ad444d9a2e6ec1ef488ff09368793d0004a6080f69d621e
+KERNEL_SHA256=490a7aedf1b355c565d3a6c05333ccccb5da82064eca46b590448a7099d7d651
 FIRECRACKER_VERSION=v1.17.0
 FIRECRACKER_SHA256=06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558
 # Claude Code in the agent image, pinned: jail-exec's syscall allowlist was traced against this version.

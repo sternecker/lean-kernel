@@ -48,11 +48,12 @@ tests/console-filter-test.py  console-filter.py cases, split-read and fuzz check
 tests/api-proxy-test.py  api-proxy.py header, beta and body policy cases
 tests/seccomp-test.py    the seccomp filter in api-proxy.py and console-filter.py
 guest/jail-exec.c        in-guest launcher: drop to the agent uid, no_new_privs, Landlock, seccomp allowlist, exec
-guest/jit-probe.c        posture probe: records whether in-process JIT (anonymous PROT_EXEC) is allowed
-guest/tool-shell.c       /bin/bash in the agent image: W^X seccomp filter, then the real bash (tool shells can't JIT)
+guest/jit-probe.c        posture probe: can this process get writable+executable memory (anonymous, or a private file mapping)
+guest/tool-shell.c       /bin/bash in the agent image: PR_SET_MDWE (kernel W^X) + a seccomp backstop, then the real bash
 guest/agent-selftest.sh  the agent VM's hardening, checked from inside it (make agent-test)
 vm/vm.json.in            Firecracker config template
-docs/                    architecture diagrams (target design; as built: HOWTO §9.5)
+docs/                    architecture diagrams (target design; as built: HOWTO §9.5);
+                         security-review-2026-11-07.md: whole-repo review, findings, fixes, version check, export-control note
 .github/workflows/       CI: fetch, config, build, check, syscalls (no boot, nothing published)
 bin/                     Firecracker release binaries (gitignored, fetched by deps-check)
 work/                    kernel source + build tree (gitignored)

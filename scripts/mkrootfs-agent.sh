@@ -190,8 +190,9 @@ fi
 export T
 
 # localhost:8080 -> host proxy over vsock. Runs as nobody in its own jail: may bind TCP 8080 and use
-# vsock, may write nothing.
-$TS /bin/jail-exec --bind 8080 --vsock 65534 /usr/bin/socat -d0 TCP-LISTEN:8080,bind=127.0.0.1,reuseaddr,fork VSOCK-CONNECT:2:8080 &
+# vsock, may write nothing, and (--mdwe) can't make memory executable: socat parses what the agent sends
+# it, and a compromised socat gets no JIT either.
+$TS /bin/jail-exec --bind 8080 --vsock --mdwe 65534 /usr/bin/socat -d0 TCP-LISTEN:8080,bind=127.0.0.1,reuseaddr,fork VSOCK-CONNECT:2:8080 &
 bridge=$!
 i=0; while ! grep -q ':1F90 00000000:0000 0A' /proc/net/tcp; do
   i=$((i+1)); [ $i -gt 50 ] && fail "bridge did not start"; sleep 0.1
@@ -211,8 +212,12 @@ if [ "$agent_mode" = selftest ]; then
   # make agent-test: hardening checks, no Claude Code, nothing forwarded upstream.
   echo "AGENT-START"
   AGENT_UID=$AGENT_UID agent_exec=$agent_exec /bin/bash.real /bin/agent-selftest root; r1=$?
+  # Same fd shape as a headless agent (stdin /dev/null, stdout and stderr a pipe, never the console), so
+  # jail-exec grants no terminal and the self-test can check that the console is out of reach.
+  set -o pipefail
   env -i PATH=/usr/bin:/bin HOME=/home/agent AGENT_UID=$AGENT_UID agent_exec=$agent_exec \
-    $JAIL /bin/bash.real /bin/agent-selftest agent; r2=$?
+    $JAIL /bin/bash.real /bin/agent-selftest agent </dev/null 2>&1 | cat; r2=$?
+  set +o pipefail
   echo; echo "AGENT-EXIT=$((r1 + r2))"
 elif [ "$agent_mode" = headless ]; then
   # The task comes on its own read-only raw drive (/dev/vdc) that the host writes fresh each run: line 1

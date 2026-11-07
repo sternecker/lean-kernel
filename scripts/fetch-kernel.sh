@@ -80,7 +80,7 @@ fi
 marker="$SRC/.lean-kernel-extracted"
 if [[ -f "$marker" && "$(cat "$marker")" == "$KERNEL_SHA256" ]]; then
   :
-elif [[ -d "$SRC" && ! -f "$marker" ]] && tar --compare -xJf "$tar" -C "$WORK" >/dev/null 2>&1; then
+elif [[ -d "$SRC" && ! -f "$marker" ]] && tar --compare -Jf "$tar" -C "$WORK" >/dev/null 2>&1; then
   echo "$KERNEL_SHA256" > "$marker"
   note "existing source tree matches the tarball"
 else

@@ -66,6 +66,16 @@ check "can't change the managed settings" "$([ -n "$out" ] && [ -s /etc/claude-c
 
 out="$( { cat /dev/kmsg; } 2>&1 | head -n 1)"
 check "can't open /dev/kmsg" "$(case "$out" in *"Permission denied"*) echo 1 ;; *) echo 0 ;; esac)" "$out"
+# Headless mode's result markers (AGENT-EXIT=, DENIALS-*, MANAGED-HOOKS=) are unforgeable only because every
+# byte the agent prints goes through init's "| " prefix: it must have no other path to the serial console.
+# init runs this test with the headless fd shape, so jail-exec grants no terminal. /dev/ttyS0 and
+# /dev/console are root-only and outside the Landlock /dev rules; /dev/tty needs a controlling terminal,
+# which a headless agent (a child of init, which has none) does not have.
+for t in /dev/ttyS0 /dev/console /dev/tty; do
+  out="$( { : > "$t"; } 2>&1)"
+  check "can't write the console via $t" "$([ -n "$out" ] && echo 1 || echo 0)" "${out##*: }"
+done
+check "no controlling terminal" "$([ ! -t 0 ] && [ ! -t 1 ] && [ ! -t 2 ] && [ -z "$(tty 2>/dev/null | grep -v 'not a tty')" ] && echo 1 || echo 0)" "$(tty 2>&1)"
 out="$( { : > /etc/selftest; } 2>&1)"
 check "can't write the root fs" "$([ -n "$out" ] && [ ! -e /etc/selftest ] && echo 1 || echo 0)" "$out"
 echo x > /home/agent/.selftest 2>/dev/null && rm -f /home/agent/.selftest && w=1 || w=0
@@ -83,10 +93,19 @@ fi
 if [ "$agent_exec" != 1 ]; then
   out="$(/bin/bash -c 'echo tool-shell-ok' 2>&1)"
   check "tool shell runs" "$([ "$out" = tool-shell-ok ] && echo 1 || echo 0)" "$out"
-  /bin/bash -c jit-probe >/dev/null 2>&1; rc=$?
-  check "tool shell can't JIT (W^X enforced)" "$([ $rc = 1 ] && echo 1 || echo 0)" "jit-probe exit $rc"
+  # jit-probe tries anonymous RW+mprotect, anonymous RWX, and a MAP_PRIVATE RWX file mapping (the path a
+  # MAP_ANONYMOUS-only filter misses); exit 1 means every path was refused.
+  out="$(/bin/bash -c jit-probe 2>&1)"; rc=$?
+  check "tool shell can't JIT by any path (W^X enforced)" "$([ $rc = 1 ] && echo 1 || echo 0)" "jit-probe exit $rc: $(echo "$out" | tr '\n' ';')"
   /bin/bash -c '/bin/bash.real -c jit-probe' >/dev/null 2>&1; rc=$?
-  check "tool shell can't shed the filter via bash.real" "$([ $rc = 1 ] && echo 1 || echo 0)" "jit-probe exit $rc"
+  check "tool shell can't shed W^X via bash.real" "$([ $rc = 1 ] && echo 1 || echo 0)" "jit-probe exit $rc"
+  # The kernel-enforced layer (PR_SET_MDWE) is what holds; the seccomp filter is the backstop.
+  v="$(/bin/bash -c 'jit-probe --get-mdwe' 2>&1)"
+  check "tool shell has MDWE set" "$([ "$v" = 1 ] && echo 1 || echo 0)" "PR_GET_MDWE=$v"
+  v="$(/bin/bash -c '/bin/bash.real -c "jit-probe --get-mdwe"' 2>&1)"
+  check "MDWE inherited through bash.real" "$([ "$v" = 1 ] && echo 1 || echo 0)" "PR_GET_MDWE=$v"
+  v="$(jit-probe --get-mdwe 2>&1)"
+  check "agent process itself has no MDWE (it is a JIT; known gap)" "$([ "$v" = 0 ] && echo 1 || echo 0)" "PR_GET_MDWE=$v"
 else
   /bin/bash -c jit-probe >/dev/null 2>&1; rc=$?
   check "tool shell JIT allowed (agent_exec=1)" "$([ $rc = 0 ] && echo 1 || echo 0)" "jit-probe exit $rc"
