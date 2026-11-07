@@ -12,6 +12,10 @@ FIRECRACKER_SHA256=06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade
 # then redo the trace (HOWTO 6c) before trusting the allowlist with it.
 CLAUDE_CODE_VERSION=2.1.316
 CLAUDE_CODE_SHA256=fd13c70000fec3f2116dfbcbb6121210b4a29328bf0e46210a59dd594a67d824
+# Where the native installer (claude.ai/install.sh) gets releases: <URL>/<version>/linux-x64/claude, with
+# <URL>/<version>/manifest.json carrying each platform's sha256. mkrootfs-agent.sh downloads the pinned version
+# from here when neither the host install nor work/claude-code/ has it, and accepts it only if it matches the pin.
+CLAUDE_CODE_URL=https://downloads.claude.ai/claude-code-releases
 # kernel-hardening-checker, pinned: make check runs it, so it's code from the network running as you.
 # Bump deliberately: review the diff, set the new commit, rerun make check.
 KHC_URL=https://github.com/a13xp0p0v/kernel-hardening-checker

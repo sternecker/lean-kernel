@@ -431,12 +431,15 @@ sends is forwarded upstream, so it spends no tokens.
 Run it after changing the image, `jail-exec`, the proxy or the wrapper.
 
 **Claude Code is pinned.** `CLAUDE_CODE_VERSION` and `CLAUDE_CODE_SHA256` in `VERSION` set the version. The image build takes it
-from the host's native install and caches it in `work/claude-code/`, since the installer prunes old versions. A newer
-host version is noted and ignored. To bump:
-1. Install the new version on the host.
-2. Run `scripts/mkrootfs-agent.sh --pin <version>` and copy the two lines it prints into `VERSION`.
-3. Redo the syscall trace (6c), because the allowlist was traced against the old version.
-4. Recheck the proxy's `ALLOW_FIELDS` (`scripts/api-proxy.py`): a new top-level field shows up as `API Error: 403
+from the host's native install and caches it in `work/claude-code/`, since the installer prunes old versions. When
+neither has it (a fresh host, or the installer already pruned it), the build downloads that version from the
+installer's own release URL (`CLAUDE_CODE_URL`, about 330 MB) and accepts it only if it matches `CLAUDE_CODE_SHA256`.
+A newer host version is noted and ignored. To bump:
+1. Run `scripts/mkrootfs-agent.sh --pin <version>` and copy the two lines it prints into `VERSION`. It uses the
+   host's installed copy when there is one, otherwise it downloads the release and checks it against the sha256
+   in the release manifest (the same check the installer makes).
+2. Redo the syscall trace (6c), because the allowlist was traced against the old version.
+3. Recheck the proxy's `ALLOW_FIELDS` (`scripts/api-proxy.py`): a new top-level field shows up as `API Error: 403
    field 'X' not allowed` in Claude Code and a DENY line in `out/agent-proxy.log`. Find what X does before adding it.
 5. Recheck `DENY_BETA_PREFIXES`. Betas are a denylist now, so a new *safe* beta needs nothing — it is forwarded.
    What to look for instead is a new *dangerous* family, or an existing allowed field gaining a fetch/server-state

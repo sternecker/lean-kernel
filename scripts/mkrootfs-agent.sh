@@ -12,19 +12,51 @@
 # the bridge from outside the jail and prints which syscalls they made (input for jail-exec's allowlist).
 # Claude Code is the version pinned in VERSION (CLAUDE_CODE_VERSION + CLAUDE_CODE_SHA256), taken from the
 # host's native install (~/.local/share/claude/versions/<version>) and cached in work/claude-code/ once
-# verified, since the installer prunes old versions. CLAUDE_BIN=<path> uses another file; it must still
-# match the pin. --pin <version> prints the VERSION lines for a host-installed version.
+# verified, since the installer prunes old versions. When neither has it (a fresh host, or the installer
+# pruned it), the pinned version is downloaded from CLAUDE_CODE_URL (the installer's own release URL) and
+# accepted only if it matches the pin. CLAUDE_BIN=<path> uses another file; it must still match the pin.
+# --pin <version> prints the VERSION lines for a version: the host's copy when installed, otherwise a
+# download checked against the release manifest's linux-x64 sha256 (what the installer checks).
 source "$(dirname "$0")/_env.sh"
 
 AGENT_UID="${AGENT_UID:-10000}"
 size_mb="${AGENT_ROOTFS_MB:-640}"
 host_versions="$HOME/.local/share/claude/versions"
+[[ -n "${CLAUDE_CODE_URL:-}" ]] || die "VERSION has no CLAUDE_CODE_URL"
+# The host binary comes from the installer's linux-x64 (glibc) build, and so do bash and socat in the image.
+release_url() { echo "$CLAUDE_CODE_URL/$1/linux-x64/claude"; }
+# sha256 the release manifest lists for linux-x64 (the installer's check). Bash regex, as in install.sh:
+# [^{}] keeps the match inside the linux-x64 object, and the closing quote keeps linux-x64-musl out.
+manifest_sha256() {
+  local json; json="$(curl -sSfL "$CLAUDE_CODE_URL/$1/manifest.json")" || return 1
+  json="${json//[$'\n\r\t']/}"
+  [[ "$json" =~ \"linux-x64\"[[:space:]]*:[[:space:]]*[{][^{}]*\"checksum\"[[:space:]]*:[[:space:]]*\"([a-f0-9]{64})\" ]] || return 1
+  echo "${BASH_REMATCH[1]}"
+}
+# download_release VERSION DEST: fetch the binary to DEST.tmp (caller verifies, then moves it into place).
+download_release() {
+  note "downloading Claude Code $1 from $(release_url "$1")"
+  mkdir -p "$(dirname "$2")"
+  curl -sSfL -o "$2.tmp" "$(release_url "$1")" || { rm -f -- "$2.tmp"; die "download failed: $(release_url "$1")"; }
+  chmod 755 -- "$2.tmp"  # curl writes 644; the host install is 755
+}
 if [[ "${1:-}" == "--pin" ]]; then
   v="${2:?usage: $0 --pin <version>}"
-  [[ -f "$host_versions/$v" ]] || die "$host_versions/$v not found; install that version of Claude Code first"
+  src="$host_versions/$v"
+  if [[ ! -f "$src" ]]; then
+    src="$WORK/claude-code/$v"
+    if [[ ! -f "$src" ]]; then
+      want="$(manifest_sha256 "$v")" || die "no release manifest for $v at $CLAUDE_CODE_URL/$v/manifest.json (not a released version?)"
+      download_release "$v" "$src"
+      echo "$want  $src.tmp" | sha256sum -c --quiet - >/dev/null 2>&1 \
+        || { rm -f -- "$src.tmp"; die "downloaded $v does not match the manifest's linux-x64 sha256 $want"; }
+      mv -f -- "$src.tmp" "$src"
+      echo "verified against the release manifest and cached at $src"
+    fi
+  fi
   echo "put these in VERSION (then redo the syscall trace, HOWTO 6c):"
   echo "CLAUDE_CODE_VERSION=$v"
-  echo "CLAUDE_CODE_SHA256=$(sha256sum "$host_versions/$v" | cut -d' ' -f1)"
+  echo "CLAUDE_CODE_SHA256=$(sha256sum "$src" | cut -d' ' -f1)"
   exit 0
 fi
 [[ "${CLAUDE_CODE_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] || die "VERSION has no CLAUDE_CODE_SHA256"
@@ -36,7 +68,15 @@ for c in ${CLAUDE_BIN:+"$CLAUDE_BIN"} "$cache" "$host_versions/$CLAUDE_CODE_VERS
   if pin_ok "$c"; then claude_bin="$c"; break; fi
   echo "warn: $c does not match CLAUDE_CODE_SHA256; skipping it" >&2
 done
-[[ -n "$claude_bin" ]] || die "no Claude Code $CLAUDE_CODE_VERSION matching CLAUDE_CODE_SHA256 (looked in ${CLAUDE_BIN:+$CLAUDE_BIN, }$cache, $host_versions/$CLAUDE_CODE_VERSION)"
+if [[ -z "$claude_bin" ]]; then
+  # Not on this host (fresh install, or the installer pruned it): fetch the pinned release. The pin is the
+  # trust anchor, so a mismatch is fatal, not a warning.
+  [[ -n "${CLAUDE_BIN:-}" ]] && die "CLAUDE_BIN=$CLAUDE_BIN does not match CLAUDE_CODE_SHA256"
+  download_release "$CLAUDE_CODE_VERSION" "$cache"
+  pin_ok "$cache.tmp" || { rm -f -- "$cache.tmp"; die "downloaded Claude Code $CLAUDE_CODE_VERSION does not match CLAUDE_CODE_SHA256 (sha256 $(sha256sum "$cache.tmp" 2>/dev/null | cut -d' ' -f1)); the pin in VERSION and the release disagree"; }
+  mv -f -- "$cache.tmp" "$cache"
+  claude_bin="$cache"
+fi
 if [[ "$claude_bin" != "$cache" ]]; then
   mkdir -p "$(dirname "$cache")"; cp -- "$claude_bin" "$cache.tmp" && mv -f -- "$cache.tmp" "$cache"
   claude_bin="$cache"
@@ -73,7 +113,7 @@ cp "$bb" "$stage/bin/busybox";           copy_libs "$bb"
 cp "$bash_bin" "$stage/bin/bash.real";   copy_libs "$bash_bin"
 cp "$OUT/tool-shell" "$stage/bin/bash"
 cp "$socat_bin" "$stage/usr/bin/socat";  copy_libs "$socat_bin"
-cp "$claude_bin" "$stage/usr/local/bin/claude"; copy_libs "$claude_bin"
+install -m 755 "$claude_bin" "$stage/usr/local/bin/claude"; copy_libs "$claude_bin"
 cp "$OUT/jail-exec" "$stage/bin/jail-exec"
 cp "$OUT/jit-probe" "$stage/bin/jit-probe"
 cp "$ROOT/guest/agent-selftest.sh" "$stage/bin/agent-selftest"
