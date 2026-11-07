@@ -105,7 +105,8 @@ rm -rf "$stage"
 mkdir -p "$stage"/{bin,sbin,etc,proc,sys,dev,tmp,root,home/agent,usr/bin,usr/local/bin}
 
 copy_libs() {  # copy every shared library (and the loader) a binary needs, at the same path
-  ldd "$1" 2>/dev/null | awk '/=> \//{print $3} /^\s*\/(lib|lib64|usr)/{print $1}' | while read -r lib; do
+  # A static binary (RHEL's busybox) makes ldd exit 1 with "not a dynamic executable": nothing to copy, not an error.
+  { ldd "$1" 2>/dev/null || true; } | awk '/=> \//{print $3} /^\s*\/(lib|lib64|usr)/{print $1}' | while read -r lib; do
     mkdir -p "$stage$(dirname "$lib")"; cp -L "$lib" "$stage$lib"
   done
 }
