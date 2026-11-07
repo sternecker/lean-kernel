@@ -1,4 +1,4 @@
-# lean-kernel
+# lean-kernel AI JAIL
 
 Currently Debian focused. A minimal, hardened Linux guest kernel for running untrusted AI agents in Firecracker microVMs, one VM per agent, and a jailed setup that runs Claude Code in one: the credential stays in a host-side proxy, never in the VM.
 
