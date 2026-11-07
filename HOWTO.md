@@ -30,7 +30,11 @@ sudo apt install clang-22 lld-22      # the default clang build; both are in tri
 Use the versioned packages: plain `clang lld` installs 19, which can't build `KSTACK_ERASE`.
 `LLVM=0` builds with gcc and needs only the first line, but loses CFI, RANDSTRUCT and KSTACK_ERASE.
 
-`make deps` tells you what's still missing and prints the apt line.
+`make deps` tells you what's still missing and prints the apt line. Every make target first checks the host's
+distro family from `/etc/os-release` (`make distro` shows the result) and stops on anything that is not Debian-
+or RHEL-family; `LEAN_DISTRO=debian|rhel` forces one. On the RHEL family (Fedora, CentOS Stream, Rocky, Alma)
+`make deps` prints the `dnf` line with that family's package names (`elfutils-libelf-devel`, `openssl-devel`,
+unversioned `clang lld`), but the build itself is only exercised on Debian 13.
 
 ## 2. Configure
 
@@ -344,9 +348,12 @@ can't send escape sequences to your terminal. Interactive mode can't strip them 
 full-screen interface, so the serial console goes through `scripts/console-filter.py`, which parses it as a terminal
 would and re-emits only allowlisted sequences: text, CSI (cursor, colours, modes, mouse and keyboard protocols),
 titles and colour queries. It drops OSC 52 (clipboard write and read), every other OSC (hyperlinks, notifications,
-colour changes), DCS/APC/PM strings, title reports and window moves, C1 controls and bidi characters. At exit it
+colour changes), DCS/APC/PM strings, title reports and window moves, xterm hilite mouse tracking (which hangs the
+terminal until the program answers a click), CSI parameters of six or more digits (a billion-count REP), C1 controls
+and bidi characters. At exit it
 resets the terminal modes the guest may have left on and discards late terminal replies before your shell can read
-them. The guest still controls what's on screen while it runs. Tests: `python3 -I tests/console-filter-test.py`. Both host-side processes that read guest bytes,
+them. The guest still controls what's on screen while it runs. Tests: `python3 -I tests/console-filter-test.py`, which include
+every payload from STÖK's "Weaponizing Plain Text" appendix (DEF CON 31 / Black Hat USA 2023, linked in the README). Both host-side processes that read guest bytes,
 the proxy and the console filter, load a seccomp filter once set up (the same block in both scripts): no exec,
 no ptrace, no namespaces or mounts, no bpf, io_uring, userfaultfd, perf or keyrings; the proxy may open only
 Unix and IP sockets, and the console filter (which runs as you) may open, create or change no file and make no socket or process. It's a

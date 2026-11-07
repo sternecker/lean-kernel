@@ -1,11 +1,15 @@
 # lean-kernel: minimal hardened Firecracker guest kernel.
 # Every target is a thin wrapper over scripts/; run the script directly for options.
 
-.PHONY: all deps fetch config build check syscalls rootfs run test agent-rootfs agent agent-test sbom clean distclean
+.PHONY: all distro deps fetch config build check syscalls rootfs run test agent-rootfs agent agent-test sbom clean distclean
 
 # Every step that needs no input and spends no tokens, in order; see scripts/all.sh (--vsock, --no-agent).
 all:
 	@scripts/all.sh
+
+# Which distro family (debian/rhel) the scripts detected; every target stops on an unsupported host.
+distro:
+	@scripts/distro-check.sh
 
 deps:
 	@scripts/deps-check.sh

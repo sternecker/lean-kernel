@@ -8,7 +8,7 @@
 source "$(dirname "$0")/_env.sh"
 
 size_mb="${ROOTFS_MB:-64}"
-bb="$(command -v busybox)" || die "busybox not installed (apt install busybox-static)"
+bb="$(command -v busybox)" || die "busybox not installed ($PKG_INSTALL $(pkg busybox-static busybox))"
 stage="$WORK/rootfs-stage"
 rm -rf "$stage"; mkdir -p "$stage"/{bin,sbin,etc,proc,sys,dev,tmp,root,lib,lib64,usr/bin}
 

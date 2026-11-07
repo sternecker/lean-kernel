@@ -10,9 +10,11 @@ differently than we did. Sequences split across reads are held until they comple
 Passed:
   - printable text, TAB, LF, CR, BS, BEL
   - CSI sequences (cursor, SGR colours, modes, mouse and keyboard protocols, numeric queries), except
-    window operations (CSI t) other than size reports, media copy (CSI i), and the private modes that
-    change how the terminal parses everything after them (DECANM ?2: VT52 mode) or resize the window
-    (DECCOLM ?3: 132 columns)
+    window operations (CSI t) other than size reports, media copy (CSI i), the private modes that
+    change how the terminal parses everything after them (DECANM ?2: VT52 mode), resize the window
+    (DECCOLM ?3: 132 columns) or make the terminal wait on the guest (?1001: xterm hilite mouse tracking,
+    which hangs xterm unless the program answers every click), and any CSI with a numeric parameter of
+    six or more digits (REP: CSI 1000000000 b asks for a billion cells; nothing the TUI sends is that big)
   - two-character ESC sequences (ESC 7, ESC =, ESC ( B, ...)
   - OSC 0/1/2 (window title), with control and bidi characters removed from the title
   - OSC 10/11/12 ;? (foreground/background/cursor colour queries; the reply holds only colour values)
@@ -26,6 +28,13 @@ Dropped:
     session with its own push and pop, so the title the guest set is gone when the run ends)
   - other C0 controls, DEL, C1 controls (8-bit CSI/OSC/DCS included) and the bidi/format characters
     that reorder or hide text (U+061C, U+200B-U+200F except U+200D, U+202A-U+202E, U+2066-U+2069, U+FEFF)
+
+Threat model: the guest writes attacker-chosen bytes to a terminal the user trusts. The survey of what
+that buys is Fredrik "STÖK" Alexandersson, "Weaponizing Plain Text: ANSI Escape Sequences as a Forensic
+Nightmare" (DEF CON 31 / Black Hat USA 2023); its appendix lists the payloads, and tests/console-filter-test.py
+runs each of them through this filter:
+  https://i.blackhat.com/BH-US-23/Presentations/US-23-stok-weponizing-plain-text-ansi-escape-sequences-as-a-forensic-nightmare-appendix.pdf
+Sequence semantics are from xterm's ctlseqs: https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
 
 At start it pushes the terminal's title (CSI 22 t). At end of input it pops it back and resets terminal
 state the guest may have left behind: a soft reset (DECSTR: scroll region, insert, origin and autowrap
@@ -51,9 +60,15 @@ MAX_OSC = 512    # longest OSC payload kept; longer ones are dropped (titles are
 # owns the title stack for the session (START/RESET below), and a guest pop would unbalance it.
 WINOPS_OK = {"14", "16", "18"}
 # DECSET/DECRST private modes dropped whatever the final byte: 2 (DECANM: ?2l puts xterm into VT52 mode, a
-# different parser, after which nothing below resets it) and 3 (DECCOLM: resizes to 132/80 columns and
-# clears the screen).
-MODES_DENY = {"2", "3"}
+# different parser, after which nothing below resets it), 3 (DECCOLM: resizes to 132/80 columns and
+# clears the screen) and 1001 (hilite mouse tracking: on a click xterm ignores all X events until the
+# program replies with CSI ... T; ctlseqs: "requires a cooperating program, else xterm will hang").
+MODES_DENY = {"2", "3", "1001"}
+# A CSI with any numeric parameter of this many digits or more is dropped. Legitimate parameters are
+# small (colours <= 255, positions and modes < 10000); a huge one is amplification: REP (CSI Ps b) with
+# Ps = 1000000000 repeats a character a billion times, which has hung or crashed terminals.
+MAX_PARAM_DIGITS = 6
+BIG_PARAM = re.compile(r"\d{%d}" % MAX_PARAM_DIGITS)
 
 START = "\x1b[22;0t"   # push the icon name and title; RESET pops them
 RESET = (
@@ -65,7 +80,7 @@ RESET = (
     "\x1b[>4;0m"     # modifyOtherKeys off (xterm; not in DECSTR)
     "\x1b[?1l\x1b>"  # normal cursor keys, numeric keypad (for terminals without DECSTR)
     "\x1b[?2026l"    # synchronized output off
-    "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l"  # mouse reporting off
+    "\x1b[?1000l\x1b[?1001l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1007l\x1b[?1015l"  # mouse reporting off
     "\x1b[?1004l"    # focus reporting off
     "\x1b[?2004l"    # bracketed paste off (the host shell's readline turns it back on)
     "\x1b[<99u"      # pop kitty keyboard protocol flags
@@ -184,6 +199,8 @@ class Filter:
         if not m:
             return
         params, inter = m.groups()
+        if BIG_PARAM.search(params):
+            return
         if final == "i":   # media copy: printing
             return
         if final == "t" and not inter:

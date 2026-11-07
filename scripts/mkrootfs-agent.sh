@@ -44,8 +44,8 @@ fi
 host_now="$(readlink -f "$(command -v claude 2>/dev/null)" 2>/dev/null || true)"
 [[ -n "$host_now" && "$(basename "$host_now")" != "$CLAUDE_CODE_VERSION" ]] \
   && echo "note: the host runs Claude Code $(basename "$host_now"); the image uses the pinned $CLAUDE_CODE_VERSION"
-bb="$(command -v busybox)" || die "busybox not installed (apt install busybox-static)"
-socat_bin="$(command -v socat)" || die "socat not installed (apt install socat)"
+bb="$(command -v busybox)" || die "busybox not installed ($PKG_INSTALL $(pkg busybox-static busybox))"
+socat_bin="$(command -v socat)" || die "socat not installed ($PKG_INSTALL socat)"
 bash_bin="$(readlink -f /bin/bash)"
 grep -q "^# CONFIG_INET is not set" "$OUT/.config" 2>/dev/null \
   && die "out/.config is the vsock-only profile; the agent bridge needs loopback TCP (rebuild without VSOCK_ONLY=1)"

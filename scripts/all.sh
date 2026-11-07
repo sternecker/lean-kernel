@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run every make step that needs no input and spends no tokens, in order, and stop at the first failure:
 #
-#   deps fetch config build check syscalls rootfs test agent-rootfs agent-test
+#   distro deps fetch config build check syscalls rootfs test agent-rootfs agent-test
 #
 # then print how long each step took. Not run: `make run` and `make agent` (interactive; `make agent`
 # also spends tokens) and `make clean`/`distclean`.
@@ -56,6 +56,7 @@ deps() {
   ! grep -q '^missing:' <<< "$out"
 }
 
+run_step distro make -s -C "$ROOT" distro
 run_step deps deps
 for step in fetch config build check syscalls rootfs test; do
   run_step "$step" make -s -C "$ROOT" "$step"

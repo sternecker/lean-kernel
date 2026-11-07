@@ -26,6 +26,7 @@ configs/
 scripts/
   _env.sh                shared settings for every script (paths, toolchain, VERSION)
   all.sh                 make all: every non-interactive step in order, with a timing summary
+  distro-check.sh        which distro family the host is (debian/rhel); every target stops on anything else
   deps-check.sh          what's missing on this host
   fetch-kernel.sh        download + verify the pinned longterm tarball into work/
   configure.sh           base + fragment(s) -> out/.config, then PROVE every fragment line stuck
@@ -65,7 +66,8 @@ out/                     bzImage, vmlinux + System.map, .config, images; runs/<i
 ```sh
 make all       # every step below that needs no input and spends no tokens, stopping at the first failure
                # (scripts/all.sh --vsock adds the vsock-only profile; --no-agent skips the agent steps)
-make deps      # lists missing packages; prints the apt line
+make distro    # detected distro family (debian or rhel); LEAN_DISTRO=debian|rhel overrides detection
+make deps      # lists missing packages; prints the apt (Debian family) or dnf (RHEL family) line
 make fetch     # kernel tarball, sha256 verified against kernel.org
 make config    # merge base + lean.fragment, fail if any option was dropped by a dependency
 make build     # clang build (the default); LLVM=0 make build for gcc, without CFI/RANDSTRUCT/KSTACK_ERASE
@@ -103,7 +105,7 @@ No claim is made that the jails are complete or correct. This is defense in dept
   - The API itself as a channel: what the agent reads can still go to Anthropic as prompt content. The proxy stops it reaching anyone else through the API.
   - Misuse of the credential through allowed calls: budgets bound it, they don't prevent it.
   - Native code the agent generates at runtime: `noexec` and `vm.memfd_noexec=2` stop it running a binary it wrote to a file or a memfd, but not code it JITs into anonymous memory (`mmap`/`mprotect` with `PROT_EXEC` are allowed — Claude Code is itself a JIT — and nothing enforces userspace W^X). This grants nothing new at the host boundary (the agent already runs as its own uid under the same seccomp set), but it does hand native code a freer run at the guest kernel's syscall surface. `make agent-test` asserts this as a known gap; see HOWTO §9.5.
-  - Interactive mode's serial console in full: `scripts/console-filter.py` drops the escape sequences that reach past the screen (OSC 52 clipboard, hyperlinks, title reports, DCS/APC strings, window moves), but cursor, colour and mode sequences pass, so the guest can still draw anything on your screen, a fake host prompt included (headless output has all control characters stripped).
+  - Interactive mode's serial console in full: `scripts/console-filter.py` drops the escape sequences that reach past the screen (OSC 52 clipboard, hyperlinks, title reports, DCS/APC strings, window moves, hilite mouse tracking, oversized repeat counts), but cursor, colour and mode sequences pass, so the guest can still draw anything on your screen, a fake host prompt included (headless output has all control characters stripped).
 - Not a general-purpose kernel. Every option kept "in case" is a bug you chose to carry.
 
 ## Cadence (the real cost)
@@ -121,3 +123,5 @@ The pinned kernel is a **longterm** series. You now own its patch cadence for th
 - Firecracker getting started: https://github.com/firecracker-microvm/firecracker/blob/main/docs/getting-started.md
 - KSPP recommended settings: https://kspp.github.io/Recommended_Settings
 - kernel-hardening-checker: https://github.com/a13xp0p0v/kernel-hardening-checker
+- Console filter threat model: STÖK, "Weaponizing Plain Text: ANSI Escape Sequences as a Forensic Nightmare" (DEF CON 31 / Black Hat USA 2023); the appendix's payloads are the corpus in `tests/console-filter-test.py`: https://i.blackhat.com/BH-US-23/Presentations/US-23-stok-weponizing-plain-text-ansi-escape-sequences-as-a-forensic-nightmare-appendix.pdf
+- xterm control sequences (what the filter allows and denies, by name): https://invisible-island.net/xterm/ctlseqs/ctlseqs.html

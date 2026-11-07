@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Report missing build/runtime dependencies and fetch + verify the Firecracker release.
-# Never installs packages itself (needs sudo); prints the apt line instead.
+# Never installs packages itself (needs sudo); prints the apt/dnf line for the detected distro family
+# (see make distro) instead.
 source "$(dirname "$0")/_env.sh"
 
 missing=()
@@ -8,13 +9,23 @@ need() { command -v "$1" >/dev/null 2>&1 || missing+=("$2"); }
 need make make; need gcc gcc; need flex flex; need bison bison; need bc bc
 need pahole dwarves; need cpio cpio; need curl curl
 need /sbin/mkfs.ext4 e2fsprogs; need fakeroot fakeroot
-for p in libelf-dev libssl-dev; do dpkg -s "$p" >/dev/null 2>&1 || missing+=("$p"); done
-if [[ "$LLVM" == "1" && -z "$LLVM_DIR" ]]; then missing+=(clang-22 lld-22); fi
+for p in "$(pkg libelf-dev elfutils-libelf-devel)" "$(pkg libssl-dev openssl-devel)"; do
+  pkg_installed "$p" || missing+=("$p")
+done
+if [[ "$LLVM" == "1" && -z "$LLVM_DIR" ]]; then
+  # Debian: versioned packages under /usr/lib/llvm-N. RHEL family: unversioned clang/lld on PATH.
+  if [[ "$DISTRO_FAMILY" == rhel ]]; then
+    command -v clang >/dev/null 2>&1 && command -v ld.lld >/dev/null 2>&1 || missing+=(clang lld)
+  else
+    missing+=(clang-22 lld-22)
+  fi
+fi
+echo "distro: $DISTRO_NAME ($DISTRO_FAMILY)"
 [[ -n "$LLVM_DIR" ]] && echo "llvm: $LLVM_DIR"
 
 if [[ ${#missing[@]} -gt 0 ]]; then
   echo "missing: ${missing[*]}"
-  echo "install: sudo apt install ${missing[*]}"
+  echo "install: $PKG_INSTALL ${missing[*]}"
 else
   echo "build dependencies: ok"
 fi

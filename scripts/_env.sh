@@ -27,6 +27,36 @@ if [[ "$LLVM" == "1" ]]; then
   MAKE_TOOLCHAIN=(LLVM="${LLVM_DIR:-1}" LLVM_IAS=1)
 fi
 
+# Host distro family, decided before anything else runs: debian (Debian, Ubuntu, ...) or rhel (RHEL,
+# Fedora, CentOS Stream, Rocky, Alma, ...). It picks the package tool, the package-presence check and the
+# package names the scripts print. Detection reads /etc/os-release (ID, then ID_LIKE); LEAN_DISTRO=debian|rhel
+# overrides it. Anything else stops here: the scripts have only been exercised on these two families.
+DISTRO_FAMILY="${LEAN_DISTRO:-}"
+DISTRO_NAME="unknown"
+if [[ -r /etc/os-release ]]; then
+  DISTRO_NAME="$(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-${ID:-unknown}}")"
+fi
+if [[ -z "$DISTRO_FAMILY" ]]; then
+  _os_ids=""
+  [[ -r /etc/os-release ]] && _os_ids="$(. /etc/os-release 2>/dev/null; echo "${ID:-} ${ID_LIKE:-}")"
+  for _id in $_os_ids; do
+    case "$_id" in
+      debian|ubuntu)             DISTRO_FAMILY=debian; break ;;
+      rhel|fedora|centos|rocky|almalinux) DISTRO_FAMILY=rhel; break ;;
+    esac
+  done
+  unset _os_ids _id
+fi
+case "$DISTRO_FAMILY" in
+  debian) PKG_INSTALL="sudo apt install"; pkg_installed() { dpkg -s "$1" >/dev/null 2>&1; } ;;
+  rhel)   PKG_INSTALL="sudo dnf install"; pkg_installed() { rpm -q "$1" >/dev/null 2>&1; } ;;
+  *) echo "error: unsupported or undetected distro ($DISTRO_NAME); lean-kernel supports Debian and RHEL families." >&2
+     echo "       set LEAN_DISTRO=debian or LEAN_DISTRO=rhel to force one (see make distro)" >&2
+     exit 1 ;;
+esac
+# pkg DEBIAN_NAME RHEL_NAME: the package name for this host's family (the same name when only one is given).
+pkg() { if [[ "$DISTRO_FAMILY" == rhel ]]; then echo "${2:-$1}"; else echo "$1"; fi; }
+
 # VSOCK_ONLY=1 adds vsock-only.fragment: no TCP/IP, no NIC driver in the guest.
 VSOCK_ONLY="${VSOCK_ONLY:-0}"
 
