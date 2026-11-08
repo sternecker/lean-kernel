@@ -242,3 +242,46 @@ CONFIG_STATIC_USERMODEHELPER_PATH=""
 # CONFIG_CROSS_MEMORY_ATTACH is not set
 # CONFIG_FANOTIFY is not set
 # CONFIG_FHANDLE is not set
+
+# ===================== CUTS: dead code left over from the base config =====================
+# Enabled in Firecracker's reference config, used by nothing in this guest (no modules, no keyrings, no
+# IPsec/tunnels, no compressed swap). Each one that Kconfig forces back on is reported by make config.
+
+# Asymmetric crypto and test code: no module or key signing, no KEYS, no in-guest TLS.
+# CONFIG_CRYPTO_RSA is not set
+# CONFIG_CRYPTO_DH is not set
+# CONFIG_CRYPTO_ECDH is not set
+# CONFIG_CRYPTO_SELFTESTS is not set
+# CONFIG_CRYPTO_FIPS is not set
+# Compression and modes with no in-guest user.
+# CONFIG_CRYPTO_DEFLATE is not set
+# CONFIG_CRYPTO_LZO is not set
+# CONFIG_CRYPTO_XTS is not set
+# (CRYPTO_SHA3 stays: selected by CRYPTO_JITTERENTROPY, which CRYPTO_DRBG selects, and the kernel RNG uses DRBG.)
+# CONFIG_EXT4_DEBUG is not set
+
+# Tunnels, netns and netlink process events: the guest has one interface and no routing role.
+# VXLAN and GENEVE are what select NET_UDP_TUNNEL, which selects NET_IP_TUNNEL; IP_MROUTE is multicast routing.
+# CONFIG_VXLAN is not set
+# CONFIG_GENEVE is not set
+# CONFIG_IP_MROUTE is not set
+# CONFIG_NET_IP_TUNNEL is not set
+# CONFIG_NET_UDP_TUNNEL is not set
+# CONFIG_NET_NS is not set
+# (NET_DEVMEM is def_bool with no prompt and NET_FAILOVER is selected by VIRTIO_NET: neither can be cut
+# in the default profile.)
+# CONFIG_PROC_EVENTS is not set
+
+# ===================== CUTS: CPU vendor code the guest can't use =====================
+# Firecracker hosts are Intel or AMD. CPU_SUP_INTEL and CPU_SUP_AMD stay: they select the guest's
+# CPU-bug detection and mitigations. The host loads microcode and owns idle and uncore counters.
+# PROCESSOR_SELECT is what makes the vendor options selectable at all; Intel and AMD are pinned on.
+CONFIG_PROCESSOR_SELECT=y
+CONFIG_CPU_SUP_INTEL=y
+CONFIG_CPU_SUP_AMD=y
+# CONFIG_CPU_SUP_HYGON is not set
+# CONFIG_CPU_SUP_CENTAUR is not set
+# CONFIG_CPU_SUP_ZHAOXIN is not set
+# CONFIG_INTEL_IDLE is not set
+# CONFIG_PERF_EVENTS_AMD_UNCORE is not set
+# (MICROCODE is def_bool y with no prompt while Intel or AMD support is on: it can't be cut. Late loading is off.)
