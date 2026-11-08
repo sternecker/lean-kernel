@@ -86,7 +86,7 @@ This repo is item 3, done so that item 2 is a build-time fact instead of a runti
 | Option | Effect |
 |---|---|
 | `RANDOMIZE_BASE`, `RANDOMIZE_MEMORY`, `RANDOMIZE_KSTACK_OFFSET_DEFAULT` | Attacker has to leak addresses before using them. |
-| `STRICT_KERNEL_RWX`, `DEBUG_WX`, `VMAP_STACK` | No writable+executable kernel memory; stack overflows hit guard pages. |
+| `STRICT_KERNEL_RWX`, `DEBUG_WX`, `VMAP_STACK` | No writable+executable kernel memory; stack overflows hit guard pages. `DEBUG_WX` is what caught 6.18's ITS thunk pages staying W+X with `MODULES=n` (`patches/0001-*`, HOWTO troubleshooting). |
 | `STACKPROTECTOR_STRONG`, `SCHED_STACK_END_CHECK` | Canaries on most functions. |
 | `SLAB_FREELIST_HARDENED`, `SLAB_FREELIST_RANDOM`, `RANDOM_KMALLOC_CACHES`, `SHUFFLE_PAGE_ALLOCATOR` (inert without `page_alloc.shuffle=1` in `boot_args`, which `vm/vm.json.in` sets), `SLAB_MERGE_DEFAULT=n` | Heap layout is unpredictable and freelist pointers are obfuscated; use-after-free and heap-spray exploits get much harder. |
 | `INIT_ON_ALLOC_DEFAULT_ON`, `INIT_ON_FREE_DEFAULT_ON`, `INIT_STACK_ALL_ZERO`, `ZERO_CALL_USED_REGS` | Uninitialized-memory bugs stop leaking data; freed memory is scrubbed. Costs a few percent CPU; the guest runs one agent. |

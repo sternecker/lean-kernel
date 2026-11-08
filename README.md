@@ -17,6 +17,8 @@ VERSION                  pinned kernel, Firecracker, and base-config versions
 LICENSE                  Apache-2.0 (this project's own source)
 THIRD-PARTY.md           licenses of the components the build fetches and the image bundles
 HOWTO.md                 the procedure; NOTES.md the reasoning
+patches/                 kernel patches applied on top of the pinned tarball (currently one, a Kconfig
+                         fix not yet in 6.18.x); README.md there lists each with its upstream status
 configs/
   base-firecracker-x86_64-6.18.config   Firecracker's reference microvm config (upstream, unmodified)
   lean.fragment          the cuts and the gcc-safe hardening, applied on top of base
@@ -28,7 +30,7 @@ scripts/
   all.sh                 make all: every non-interactive step in order, with a timing summary
   distro-check.sh        which distro family the host is (debian/rhel); every target stops on anything else
   deps-check.sh          what's missing on this host
-  fetch-kernel.sh        download + verify the pinned longterm tarball into work/
+  fetch-kernel.sh        download + verify the pinned longterm tarball into work/, apply patches/
   configure.sh           base + fragment(s) -> out/.config, then PROVE every fragment line stuck
   build.sh               make bzImage -> out/bzImage (bzImage, so KASLR applies)
   check.sh               run kernel-hardening-checker (KSPP) against out/.config
@@ -68,7 +70,7 @@ make all       # every step below that needs no input and spends no tokens, stop
                # (scripts/all.sh --vsock adds the vsock-only profile; --no-agent skips the agent steps)
 make distro    # detected distro family (debian or rhel); LEAN_DISTRO=debian|rhel overrides detection
 make deps      # lists missing packages; prints the apt (Debian family) or dnf (RHEL family) line
-make fetch     # kernel tarball, sha256 verified against kernel.org
+make fetch     # kernel tarball, sha256 verified against kernel.org, then patches/ applied
 make config    # merge base + lean.fragment, fail if any option was dropped by a dependency
 make build     # clang build (the default); LLVM=0 make build for gcc, without CFI/RANDSTRUCT/KSTACK_ERASE
 make check     # KSPP hardening checker, shows only failures

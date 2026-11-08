@@ -1,0 +1,28 @@
+x86/Kconfig: enable the execmem ROX cache when STRICT_KERNEL_RWX is set
+
+Upstream: Mike Rapoport, "x86/Kconfig: enable ROX cache in execmem when
+STRICT_KERNEL_RWX is set" (lkml, 2025-09-30), resent 2026 with
+Fixes: 47410d839fcd ("x86/Kconfig: only enable ROX cache in execmem when STRICT_MODULE_RWX is set")
+and Acked-by Rapoport and Peter Zijlstra. Not in 6.18.62. Drop this file once the pinned kernel has it
+(make fetch then fails to apply it, which is the signal).
+
+Why this build needs it: CONFIG_MODULES=n means STRICT_MODULE_RWX does not exist, so
+ARCH_HAS_EXECMEM_ROX is off and execmem_restore_rox() is an empty stub. On a host whose CPU takes the
+Indirect Target Selection mitigation ("ITS: Mitigation: Aligned branch/return thunks" in the guest's
+dmesg), its_pages_protect() then leaves the ITS thunk pages writable+executable, and DEBUG_WX reports
+"x86/mm: Checked W+X mappings: FAILED, 6 W+X pages found" at boot. With the ROX cache the thunks end
+up read-only+executable and the check passes; a one-shot "CPA detected W^X violation" warning during
+alternatives patching remains (its_alloc still calls set_memory_x on the temporarily writable page,
+in mainline too) and is harmless. Seen on an i9-8950HK under a RHEL 10 host kernel, 2026-11-07.
+
+--- a/arch/x86/Kconfig
++++ b/arch/x86/Kconfig
+@@ -85,7 +85,7 @@
+ 	select ARCH_HAS_DMA_OPS			if GART_IOMMU || XEN
+ 	select ARCH_HAS_EARLY_DEBUG		if KGDB
+ 	select ARCH_HAS_ELF_RANDOMIZE
+-	select ARCH_HAS_EXECMEM_ROX		if X86_64 && STRICT_MODULE_RWX
++	select ARCH_HAS_EXECMEM_ROX		if X86_64 && (STRICT_MODULE_RWX || STRICT_KERNEL_RWX)
+ 	select ARCH_HAS_FAST_MULTIPLIER
+ 	select ARCH_HAS_FORTIFY_SOURCE
+ 	select ARCH_HAS_GCOV_PROFILE_ALL

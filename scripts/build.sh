@@ -18,6 +18,7 @@ same_as_verified() {
   diff "$verified" "$OUT/.config" | grep -E '^[<>] (CONFIG_|# CONFIG_)' | head -n 30 >&2
   die "rerun make config with the toolchain you build with (LLVM=$LLVM), then make build"
 }
+require_patched
 require_clang
 same_as_verified
 ( cd "$SRC" && make -s "${MAKE_TOOLCHAIN[@]}" O="$OUT" syncconfig ) \

@@ -232,8 +232,9 @@ export T
 
 # localhost:8080 -> host proxy over vsock. Runs as nobody in its own jail: may bind TCP 8080 and use
 # vsock, may write nothing, and (--mdwe) can't make memory executable: socat parses what the agent sends
-# it, and a compromised socat gets no JIT either.
-$TS /bin/jail-exec --bind 8080 --vsock --mdwe 65534 /usr/bin/socat -d0 TCP-LISTEN:8080,bind=127.0.0.1,reuseaddr,fork VSOCK-CONNECT:2:8080 &
+# it, and a compromised socat gets no JIT either. No -d flag: without one socat prints errors only, on both
+# 1.7 (RHEL 10) and 1.8 (Debian 13); -d0 is a 1.8 spelling of the same and 1.7 rejects it with its usage text.
+$TS /bin/jail-exec --bind 8080 --vsock --mdwe 65534 /usr/bin/socat TCP-LISTEN:8080,bind=127.0.0.1,reuseaddr,fork VSOCK-CONNECT:2:8080 &
 bridge=$!
 i=0; while ! grep -q ':1F90 00000000:0000 0A' /proc/net/tcp; do
   i=$((i+1)); [ $i -gt 50 ] && fail "bridge did not start"; sleep 0.1

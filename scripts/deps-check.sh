@@ -9,6 +9,8 @@ need() { command -v "$1" >/dev/null 2>&1 || missing+=("$2"); }
 need make make; need gcc gcc; need flex flex; need bison bison; need bc bc
 need pahole dwarves; need cpio cpio; need curl curl
 need /sbin/mkfs.ext4 e2fsprogs; need fakeroot fakeroot
+# patches/ are applied with GNU patch, or with git apply when patch is missing (RHEL 10 default).
+command -v patch >/dev/null 2>&1 || command -v git >/dev/null 2>&1 || missing+=(patch)
 for p in "$(pkg libelf-dev elfutils-libelf-devel)" "$(pkg libssl-dev openssl-devel)"; do
   pkg_installed "$p" || missing+=("$p")
 done

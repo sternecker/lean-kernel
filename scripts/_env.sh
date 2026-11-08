@@ -42,6 +42,18 @@ require_clang() {
   [[ "$v" -ge "$CLANG_MIN" ]] || die "clang $v is too old: the LLVM build needs clang >= $CLANG_MIN ($(clang_version)); install it, or LLVM=0 for the gcc build"
 }
 
+# Kernel patches: patches/*.patch, applied by make fetch in name order right after extraction (see
+# patches/README.md). PATCHSET identifies the set; the tree records the set it carries in
+# .lean-kernel-patched, and make config / make build refuse a tree whose set is not the current one.
+PATCHES=()
+for _p in "$ROOT"/patches/*.patch; do [[ -f "$_p" ]] && PATCHES+=("$_p"); done; unset _p
+PATCHSET="$( { for _p in "${PATCHES[@]}"; do cat "$_p"; done; } | sha256sum | cut -d' ' -f1)"
+require_patched() {
+  local m="$SRC/.lean-kernel-patched"
+  [[ -f "$m" && "$(cat "$m")" == "$PATCHSET" ]] \
+    || die "kernel source at $SRC does not carry the current patch set (${#PATCHES[@]} in patches/); run make fetch"
+}
+
 # Host distro family, decided before anything else runs: debian (Debian, Ubuntu, ...) or rhel (RHEL,
 # Fedora, CentOS Stream, Rocky, Alma, ...). It picks the package tool, the package-presence check and the
 # package names the scripts print. Detection reads /etc/os-release (ID, then ID_LIKE); LEAN_DISTRO=debian|rhel

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Download the pinned longterm kernel tarball, verify it against KERNEL_SHA256 in VERSION and against
-# kernel.org's list, extract.
+# kernel.org's list, extract, apply patches/*.patch (see patches/README.md).
 # --check: compare VERSION to the current longterm release for the series and exit 1 if behind.
 # --pin:   print the KERNEL_SHA256 line for the version in VERSION (for a bump).
 source "$(dirname "$0")/_env.sh"
@@ -78,14 +78,10 @@ fi
 # extraction can never pass for a source tree. A tree from before the marker existed is compared
 # against the tarball once instead of being replaced.
 marker="$SRC/.lean-kernel-extracted"
-if [[ -f "$marker" && "$(cat "$marker")" == "$KERNEL_SHA256" ]]; then
-  :
-elif [[ -d "$SRC" && ! -f "$marker" ]] && tar --compare -Jf "$tar" -C "$WORK" >/dev/null 2>&1; then
-  echo "$KERNEL_SHA256" > "$marker"
-  note "existing source tree matches the tarball"
-else
+pmarker="$SRC/.lean-kernel-patched"
+extract() {
   note "extracting"
-  tmp="$WORK/.extract.$$"
+  local tmp="$WORK/.extract.$$"
   rm -r -f -- "$tmp"; mkdir -p "$tmp"
   tar xJf "$tar" -C "$tmp" || { rm -r -f -- "$tmp"; die "extraction failed"; }
   [[ -d "$tmp/linux-$KERNEL_VERSION" ]] || { rm -r -f -- "$tmp"; die "tarball has no linux-$KERNEL_VERSION/"; }
@@ -93,5 +89,47 @@ else
   mv -- "$tmp/linux-$KERNEL_VERSION" "$SRC"
   rmdir -- "$tmp"
   echo "$KERNEL_SHA256" > "$marker"
+}
+# patches/*.patch, in name order, with GNU patch or (RHEL 10 has no patch package by default) git apply,
+# which works outside a repository. patch_check is a dry run: it fails on a patch that does not apply,
+# including one the tree already carries, so a tree with any other patch set is re-extracted first.
+# .lean-kernel-patched then records PATCHSET (the sha256 of the set, from _env.sh).
+if command -v patch >/dev/null 2>&1; then
+  patch_check() { patch -p1 -s -N -r - --dry-run -d "$SRC" < "$1" >/dev/null 2>&1; }
+  patch_apply() { patch -p1 -s -N -r - --no-backup-if-mismatch -d "$SRC" < "$1"; }
+elif command -v git >/dev/null 2>&1; then
+  patch_check() { git -C "$SRC" apply --check "$1" >/dev/null 2>&1; }
+  patch_apply() { git -C "$SRC" apply "$1"; }
+else
+  die "neither patch nor git is installed; one is needed to apply patches/ ($PKG_INSTALL patch)"
 fi
-echo "source: $SRC"
+patches_check() { local p; for p in "${PATCHES[@]}"; do patch_check "$p" || return 1; done; }
+apply_patches() {
+  local p
+  for p in "${PATCHES[@]}"; do
+    note "applying $(basename "$p")"
+    patch_apply "$p" || die "$(basename "$p") does not apply to linux-$KERNEL_VERSION: merged upstream (drop it) or needs a rebase (see patches/README.md)"
+  done
+  echo "$PATCHSET" > "$pmarker"
+}
+tree_ok()    { [[ -f "$marker" && "$(cat "$marker")" == "$KERNEL_SHA256" ]]; }
+patched_ok() { [[ -f "$pmarker" && "$(cat "$pmarker")" == "$PATCHSET" ]]; }
+if tree_ok && patched_ok; then
+  :
+else
+  if ! tree_ok; then
+    if [[ -d "$SRC" && ! -f "$marker" ]] && tar --compare -Jf "$tar" -C "$WORK" >/dev/null 2>&1; then
+      echo "$KERNEL_SHA256" > "$marker"
+      note "existing source tree matches the tarball"
+    else
+      extract
+    fi
+  fi
+  if [[ -f "$pmarker" ]] || ! patches_check; then
+    note "source tree carries another patch set; re-extracting"
+    extract
+    patches_check || die "patches/ do not apply to a fresh linux-$KERNEL_VERSION tree (see patches/README.md)"
+  fi
+  apply_patches
+fi
+echo "source: $SRC (${#PATCHES[@]} patches applied)"

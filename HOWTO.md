@@ -42,6 +42,12 @@ releases need a newer `llvm-toolset` or `LLVM=0`. The build is exercised on Debi
 
 ## 2. Configure
 
+`make fetch` first: it downloads the pinned tarball, verifies it against `VERSION` and kernel.org, extracts it
+and applies `patches/*.patch` in name order (`patches/README.md` lists each patch, why it is carried and its
+upstream status). The tree records which patch set it carries; `make config` and `make build` refuse a tree
+whose set is not the current one, and `make fetch` re-extracts a tree that carries another set rather than
+patching on top of it.
+
 ```sh
 make config            # clang build (default): also applies configs/llvm.fragment
 LLVM=0 make config     # gcc build: no CFI, RANDSTRUCT or KSTACK_ERASE
@@ -277,6 +283,8 @@ Prints `up to date` or `BEHIND: pinned X, current longterm Y`. When behind:
 2. `rm -f out/scripts/basic/randstruct.seed` so the new kernel gets a fresh RANDSTRUCT layout (the
    seed otherwise survives every rebuild; see NOTES §5). Then `make fetch config build check` and
    reboot-test with `make run`:
+   - `make fetch` fails on a patch in `patches/` that no longer applies: either the fix was merged (delete
+     the patch) or the context moved (rebase it); `patches/README.md` has the per-patch upstream pointer.
    - `make config` fails on any fragment line that didn't take, including a cut whose symbol no longer
      exists (renamed upstream).
    - `make build` fails if the config it builds isn't byte-identical to the one `make config` verified.
@@ -546,6 +554,14 @@ Not yet:
   Firecracker config's `boot_args`; check `vm/vm.json` was regenerated from `vm.json.in`.
 - `IBT`/`shadow stack` warnings in dmesg: the host CPU (i9-8950HK) lacks CET. The options are harmless
   there and start working on hardware that has it.
+- `does not carry the current patch set`: `patches/` changed since the tree was extracted; `make fetch`
+  re-extracts and re-applies.
+- `x86/mm: Checked W+X mappings: FAILED, 6 W+X pages found` with `ITS: Mitigation: Aligned branch/return
+  thunks` in the guest's dmesg: the ITS thunk pages were left writable+executable, a 6.18 bug with
+  `MODULES=n` that `patches/0001-*` fixes. Seen under a RHEL 10 host kernel, which reports the i9-8950HK as
+  ITS-affected; the Debian 13 host kernel reports it as not affected, so there the guest never takes that
+  path. A one-shot `CPA detected W^X violation` warning during alternatives patching remains with the patch
+  (mainline has it too) and is harmless: the final W+X check passes.
 
 ## Accepted checker failures
 
