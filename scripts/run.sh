@@ -21,5 +21,6 @@ json.dump(c,open(p,"w"),indent=2)
 EOF
 fi
 rm -f "$ROOT/firecracker.sock" "$ROOT/vsock.sock"
+"$ROOT/scripts/seccomp-filter.sh" >/dev/null   # the tightened release filter, see that script
 note "booting (vcpus/mem from vm/vm.json.in); 'reboot -f' in the guest to exit"
-exec "$FC" --no-api --config-file "$cfg"
+exec "$FC" --no-api --config-file "$cfg" --seccomp-filter "$OUT/seccomp-filter.bpf"

@@ -16,13 +16,15 @@
 #
 # Per run:
 #   /srv/lean-agent/firecracker/<id>/root   chroot: kernel, root image and task drive (read-only copies),
-#                                           the scratch drive, the config, the vsock socket. Root-owned while root fills
+#                                           the scratch drive, the config, the seccomp filter, the vsock socket. Root-owned while root fills
 #                                           it, handed to the run's Firecracker uid only just before launch.
 #   /srv/lean-agent/firecracker/<id>/proxy  the proxy's directory, owned by lean-proxy
 #   Firecracker: a uid of its own for this run (FC_UID_BASE.., no passwd entry; claimed in /run, so two
 #     concurrent VMs never share one and can't reach each other's chroot), chroot, its own empty network
 #     namespace (no route anywhere), cgroup
-#     limits (memory, pids, cpu) under /sys/fs/cgroup/lean-agent/<id>, fd limit, and its own seccomp
+#     limits (memory, pids, cpu) under /sys/fs/cgroup/lean-agent/<id>, fd limit, and a tightened copy of
+#     its own seccomp filter (LIB/seccomp-filter.bpf from jail-setup: the release filter minus io_uring,
+#     default kill_process; scripts/seccomp-filter.sh says why)
 #   proxy: uid lean-proxy, no groups, no capabilities, no_new_privs, its own cgroup (memory, tasks),
 #     at most 16 guest connections, 30 s idle timeout, a rate-limited and capped log. The token arrives on a pipe.
 #     Egress: root resolves api.anthropic.com, hands the addresses to the proxy (which then needs no
@@ -202,6 +204,13 @@ if [[ "${1:-}" == "--check" ]]; then
   done
   echo "jailer:      $("$LIB/jailer" --version | head -1)"
   echo "firecracker: $("$LIB/firecracker" --version | head -1)"
+  [[ -f "$LIB/seccomp-filter.bpf" && "$(stat -c '%u %a' "$LIB/seccomp-filter.bpf")" == "0 644" ]] \
+    || die "$LIB/seccomp-filter.bpf missing or not root-owned 0644; rerun: sudo scripts/jail-setup.sh"
+  echo "seccomp:     $LIB/seccomp-filter.bpf (release filter minus io_uring, default kill_process)"
+  # Host-level items from Firecracker's production guidance (NOTES.md recommends them too); shown, not enforced.
+  io_uring="$(cat /proc/sys/kernel/io_uring_disabled 2>/dev/null || echo '?')"
+  swaps="$(grep -c '^/' /proc/swaps 2>/dev/null || true)"
+  echo "host:        io_uring_disabled=$io_uring$([[ "$io_uring" == 2 ]] || echo ' (recommended: sysctl kernel.io_uring_disabled=2)'), swap devices ${swaps:-0}$([[ "${swaps:-0}" == 0 ]] || echo ' (recommended: none)'), smt $(cat /sys/devices/system/cpu/smt/control 2>/dev/null || echo '?'), ksm $(cat /sys/kernel/mm/ksm/run 2>/dev/null || echo '?')"
   free=0
   for (( u = FC_UID_BASE; u < FC_UID_BASE + FC_UID_COUNT; u++ )); do
     uid_claimed "$u" || uid_in_use "$u" || free=$((free + 1))
@@ -313,6 +322,8 @@ put "$OUT/rootfs-agent.ext4"  "$jail/rootfs.ext4"  0444 root:root
 put "$RUNDIR/scratch.ext4"     "$jail/scratch.ext4" 0600 "$fc_uid:$fc_gid"
 put "$RUNDIR/task.img"         "$jail/task.img"     0444 root:root
 put "$RUNDIR/vm-jail.json"     "$jail/vm.json"      0444 root:root
+[[ -f "$LIB/seccomp-filter.bpf" ]] || die "$LIB/seccomp-filter.bpf missing; rerun: sudo scripts/jail-setup.sh"
+put "$LIB/seccomp-filter.bpf"  "$jail/seccomp-filter.bpf" 0444 root:root
 # Largest file Firecracker may write: the scratch drive it was given, plus a little. A write past
 # RLIMIT_FSIZE fails, so this must not be smaller than the drive.
 FSIZE_MAX=$(( $(stat -c %s "$jail/scratch.ext4") + 64 * 1024 * 1024 ))
@@ -376,7 +387,7 @@ relay=$!
 "$LIB/jailer" --id "$id" --exec-file "$LIB/firecracker" --uid "$fc_uid" --gid "$fc_gid" \
   --chroot-base-dir "$BASE" --netns "/run/netns/$ns" "${cg[@]}" --resource-limit no-file=1024 \
   --resource-limit "fsize=$FSIZE_MAX" \
-  -- --no-api --config-file vm.json --level Error <&"$fc_in" \
+  -- --no-api --config-file vm.json --seccomp-filter seccomp-filter.bpf --level Error <&"$fc_in" \
   2> >(as_owner sh -c 'cat >> "$1"' sh "$RUNDIR/firecracker.log") &
 fc=$!
 exec {fc_in}<&-

@@ -31,6 +31,8 @@ scripts/
   distro-check.sh        which distro family the host is (debian/rhel); every target stops on anything else
   deps-check.sh          what's missing on this host
   fetch-kernel.sh        download + verify the pinned longterm tarball into work/, apply patches/
+  fetch-firecracker.sh   --check: behind the current release?  --pin: download, verify (checksum, second host,
+                         asset history, contents) and print the VERSION lines; Firecracker ships unsigned
   configure.sh           base + fragment(s) -> out/.config, then PROVE every fragment line stuck
   build.sh               make bzImage -> out/bzImage (bzImage, so KASLR applies)
   check.sh               run kernel-hardening-checker (KSPP) against out/.config
@@ -44,7 +46,8 @@ scripts/
   console-filter.py      interactive console: passes the sequences the TUI needs, drops clipboard/OSC/DCS and the rest
   api-proxy.py           host-side API proxy: holds the credential, allowlists paths/headers/bodies, denylists dangerous betas, budgets
   lean-agent-jail        root wrapper: Firecracker under the jailer (uid per run), the proxy as lean-proxy
-  jail-setup.sh          one-time sudo install of the wrapper, users, sudoers rule and config
+  jail-setup.sh          one-time sudo install of the wrapper, users, sudoers rule, config and seccomp filter
+  seccomp-filter.sh      Firecracker's seccomp filter: the release's own minus io_uring, default kill_process
   sbom.sh                SPDX + CycloneDX SBOM of the agent image with syft (make sbom)
 tests/probe.c            in-guest probe: tries every cut as root, as a user, and under jail-exec
 tests/console-filter-test.py  console-filter.py cases, split-read and fuzz checks
@@ -114,8 +117,11 @@ No claim is made that the jails are complete or correct. This is defense in dept
 
 The pinned kernel is a **longterm** series. You now own its patch cadence for this guest:
 
-1. Weekly: `scripts/fetch-kernel.sh --check` compares `VERSION` to kernel.org's current longterm for the series.
+1. Weekly: `scripts/fetch-kernel.sh --check` compares `VERSION` to kernel.org's current longterm for the series;
+   `scripts/fetch-firecracker.sh --check` does the same against Firecracker's current release.
 2. On a new point release: bump `VERSION`, `make fetch config build check`, boot test, commit the `.config` diff.
+   Firecracker: `scripts/fetch-firecracker.sh --pin <version> --via <other host>` verifies the release every way it
+   can be verified (it ships unsigned) and prints the `VERSION` lines; then `make deps`, `sudo scripts/jail-setup.sh`.
 3. Firecracker releases: bump `VERSION`, `make deps` re-fetches and verifies the sha256, then `sudo scripts/jail-setup.sh` installs the new binaries.
 4. Claude Code: pinned in `VERSION`. A bump means a new syscall trace and a check of the proxy's field allowlist (HOWTO §9.5).
 

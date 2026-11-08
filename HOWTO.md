@@ -293,8 +293,26 @@ Prints `up to date` or `BEHIND: pinned X, current longterm Y`. When behind:
 3. Commit `VERSION` and the `.config` diff (`out/lean-<ver>.config` is copied for exactly this; diff it
    against the previous one before committing).
 
-Firecracker: watch https://github.com/firecracker-microvm/firecracker/releases; bump
-`FIRECRACKER_VERSION` and `FIRECRACKER_SHA256` in `VERSION`, then `make deps`.
+Firecracker, weekly as well:
+
+```sh
+scripts/fetch-firecracker.sh --check                       # VERSION vs. the current GitHub release
+scripts/fetch-firecracker.sh --pin v1.18.0 --via centos10  # when behind: download, verify, print the VERSION lines
+```
+
+Then paste the lines into `VERSION`, `make deps`, `sudo scripts/jail-setup.sh` (the jail's root-owned copies and
+its seccomp filter come from the tarball), `make test agent-test`, and read the new release's
+`seccomp-filter-<v>.json` diff against the old one, since `scripts/seccomp-filter.sh` edits it.
+
+What `--pin` verifies, honestly: Firecracker signs nothing. Its tags are annotated but unsigned (v1.14.0
+through v1.17.0 checked), release commits are unsigned, the tarball carries no signature or GitHub
+attestation, and the PGP key in its repo is for encrypting vulnerability reports. The pin in `VERSION` is
+therefore the anchor, and `--pin` works the one moment it is set: the release must be a published non-draft,
+its tag's commit is recorded, a tarball or checksum file re-uploaded after the release is flagged, a release
+younger than two days is refused without `--allow-fresh`, the tarball must match the release's published
+`.sha256.txt`, `--via HOST` fetches and hashes the same URL from a second machine so a substitution would have to
+reach both network paths, and the tarball's own `SHA256SUMS` and `firecracker --version` must agree with it.
+After that, every `make deps` and `jail-setup.sh` reproduces the pinned bytes or stops.
 
 If the weekly check isn't happening, this guest kernel is worse than a distro kernel, because a distro
 kernel patches itself.
@@ -320,6 +338,14 @@ In order, one at a time:
 
 `make agent` and `make agent-test` require the jail (9.2) by default. Before it's set up, prefix them with `JAIL=0`
 to run Firecracker and the proxy as you.
+
+Every Firecracker launch here (`make run`, `make test`, `make agent`, jailed or not) passes `--seccomp-filter`
+with the release's own filter tightened by `scripts/seccomp-filter.sh`: the io_uring rules removed (io_uring
+opcodes bypass seccomp, and the Async block engine that needs them is not used) and `kill_process` instead of
+`trap` as the default action. The unjailed paths build `out/seccomp-filter.bpf`; `jail-setup.sh` builds a
+root-owned copy from the verified tarball for the jail. `docs/firecracker-review-v1.17.0.md` has the reasoning.
+`lean-agent-jail --check` also shows the host-level items Firecracker's production guide asks for (io_uring
+disabled, no swap, SMT, KSM); it reports them, it does not change them.
 
 ```sh
 claude setup-token                       # on the host; prints a long-lived subscription token
@@ -556,6 +582,10 @@ Not yet:
   there and start working on hardware that has it.
 - `does not carry the current patch set`: `patches/` changed since the tree was extracted; `make fetch`
   re-extracts and re-applies.
+- Firecracker exits at once with no message (exit code 159, SIGSYS) after a Firecracker or kernel bump: the
+  tightened seccomp filter (`scripts/seccomp-filter.sh`) denied a syscall the new version needs. The host's
+  audit log (`journalctl -k | grep SECCOMP` or `dmesg`) names the syscall; compare with the new release's
+  `seccomp-filter-<v>.json` and rebuild with `scripts/seccomp-filter.sh` (the jail: rerun `jail-setup.sh`).
 - `x86/mm: Checked W+X mappings: FAILED, 6 W+X pages found` with `ITS: Mitigation: Aligned branch/return
   thunks` in the guest's dmesg: the ITS thunk pages were left writable+executable, a 6.18 bug with
   `MODULES=n` that `patches/0001-*` fixes. Seen under a RHEL 10 host kernel, which reports the i9-8950HK as

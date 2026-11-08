@@ -44,7 +44,12 @@ esac
 # run two VMs on one set of files.
 [[ $jailed == 0 ]] || grep -q '^    run=\*)' "$WRAPPER" \
   || die "the installed $WRAPPER predates per-run directories; rerun: sudo scripts/jail-setup.sh"
+[[ $jailed == 0 ]] || grep -q 'seccomp-filter.bpf' "$WRAPPER" \
+  || die "the installed $WRAPPER predates the tightened seccomp filter; rerun: sudo scripts/jail-setup.sh"
 [[ $jailed == 1 || -x "$FC" ]] || die "firecracker missing; run make deps"
+# Every Firecracker here runs under the tightened release filter (scripts/seccomp-filter.sh); the jail
+# uses the root-owned copy jail-setup built, the unjailed path the one in out/.
+[[ $jailed == 1 ]] || "$ROOT/scripts/seccomp-filter.sh" >/dev/null
 [[ -f "$OUT/bzImage" ]] || die "no out/bzImage; run make build"
 [[ -f "$OUT/rootfs-agent.ext4" ]] || die "no out/rootfs-agent.ext4; run make agent-rootfs"
 [[ -f "$TOKEN_FILE" ]] || die "no token at $TOKEN_FILE. Run: claude setup-token, then save the token there with chmod 600 (or set TOKEN_FILE)"
@@ -197,7 +202,8 @@ else
   proxy=$!
   for _ in $(seq 50); do [[ -S "${vsock}_8080" ]] && break; sleep 0.1; done
   [[ -S "${vsock}_8080" ]] || die "api-proxy did not start; see $plog"
-  launch=(env -u ANTHROPIC_API_KEY -u CLAUDE_CODE_OAUTH_TOKEN "$FC" --no-api --level Error --config-file "$cfg")
+  launch=(env -u ANTHROPIC_API_KEY -u CLAUDE_CODE_OAUTH_TOKEN "$FC" --no-api --level Error --config-file "$cfg"
+          --seccomp-filter "$OUT/seccomp-filter.bpf")
   where="unjailed: Firecracker and the proxy run as $(id -un) (sudo scripts/jail-setup.sh to jail them)"
 fi
 

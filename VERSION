@@ -7,6 +7,8 @@ KERNEL_URL=https://cdn.kernel.org/pub/linux/kernel/v6.x
 KERNEL_SHA256=490a7aedf1b355c565d3a6c05333ccccb5da82064eca46b590448a7099d7d651
 FIRECRACKER_VERSION=v1.17.0
 FIRECRACKER_SHA256=06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558
+# v1.17.0: published 2026-09-10T14:19:40Z, tag commit 95f868c8e345b1cc8faccd1a3c910b4989dc3f58, pinned 2026-11-08 (hash confirmed via centos10;
+# scripts/fetch-firecracker.sh --pin prints these lines. Firecracker ships unsigned: the pin is the anchor, see HOWTO §8)
 # Claude Code in the agent image, pinned: jail-exec's syscall allowlist was traced against this version.
 # Bump: install the new version on the host, scripts/mkrootfs-agent.sh --pin <version> prints both lines,
 # then redo the trace (HOWTO 6c) before trusting the allowlist with it.

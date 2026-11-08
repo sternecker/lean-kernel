@@ -543,6 +543,12 @@ class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     closed at once, so the guest can't make the proxy hold an unbounded number of threads."""
     daemon_threads = True
     max_connections = 16
+    # Listen backlog (socketserver's default is 5). Firecracker's vsock device connects to this socket with
+    # a blocking connect() on its VMM thread (docs/firecracker-review-v1.17.0.md, B), and a guest can send
+    # up to 256 connection requests per queue pass; a deeper backlog keeps that thread from parking in
+    # connect() while the accept loop below catches up. The loop itself never blocks: a connection is
+    # either handed to a thread or closed at once.
+    request_queue_size = 128
 
     def server_activate(self):
         super().server_activate()

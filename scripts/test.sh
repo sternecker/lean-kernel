@@ -21,8 +21,10 @@ if grep -q "^# CONFIG_INET is not set" "$OUT/.config"; then
   sed -i 's|"boot_args": "\([^"]*\)"|"boot_args": "\1 probe_profile=vsock"|' "$cfg"
 fi
 rm -f "$OUT/vsock-test.sock"
+# The same tightened seccomp filter every launch uses, so this test also proves it lets a VM boot and run.
+"$ROOT/scripts/seccomp-filter.sh" >/dev/null
 note "booting probe guest"
-timeout 120 "$FC" --no-api --config-file "$cfg" </dev/null 2>&1 | tr -d '\r' > "$OUT/test.log" || true
+timeout 120 "$FC" --no-api --config-file "$cfg" --seccomp-filter "$OUT/seccomp-filter.bpf" </dev/null 2>&1 | tr -d '\r' > "$OUT/test.log" || true
 rm -f "$OUT/vsock-test.sock"
 
 grep -E '^(PASS|FAIL|INFO|SURFACE) ' "$OUT/test.log" || true

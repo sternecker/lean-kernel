@@ -11,6 +11,9 @@
 #   files      /usr/local/lib/lean-agent/{jailer,firecracker}  root-owned copies from the release
 #                tarball, re-verified against FIRECRACKER_SHA256 in VERSION. Root must never run the
 #                copies in bin/, which the repo owner can write.
+#              /usr/local/lib/lean-agent/seccomp-filter.{bpf,json}  Firecracker's seccomp filter: the
+#                release's own minus io_uring, default kill_process (scripts/seccomp-filter.sh), compiled
+#                here from the verified tarball's JSON with its seccompiler
 #              /usr/local/sbin/lean-agent-jail                 root-owned copy of scripts/lean-agent-jail
 #              /etc/lean-agent.conf                            owner, paths, cgroup limits
 #              /etc/sudoers.d/lean-agent                       lets OWNER run exactly
@@ -30,7 +33,7 @@ SUDOERS=/etc/sudoers.d/lean-agent
 
 if [[ "${1:-install}" == uninstall ]]; then
   rm -f "$WRAPPER" "$SUDOERS" "$CONF"
-  rm -f "$LIB/jailer" "$LIB/firecracker"; rmdir "$LIB" 2>/dev/null || true
+  rm -f "$LIB/jailer" "$LIB/firecracker" "$LIB/seccomp-filter.bpf" "$LIB/seccomp-filter.json"; rmdir "$LIB" 2>/dev/null || true
   rmdir /srv/lean-agent/firecracker /srv/lean-agent 2>/dev/null || true
   rmdir /sys/fs/cgroup/lean-agent 2>/dev/null || true
   rm -f /run/lean-agent/uids/.lock; rmdir /run/lean-agent/uids /run/lean-agent 2>/dev/null || true
@@ -63,6 +66,11 @@ rel="$tmp/release-$FIRECRACKER_VERSION-x86_64"
 install -d -o root -g root -m 0755 "$LIB"
 install -o root -g root -m 0755 "$rel/jailer-$FIRECRACKER_VERSION-x86_64" "$LIB/jailer"
 install -o root -g root -m 0755 "$rel/firecracker-$FIRECRACKER_VERSION-x86_64" "$LIB/firecracker"
+# Firecracker's seccomp filter, from the verified tarball's JSON and seccompiler (never from bin/):
+# docs/firecracker-review-v1.17.0.md A and G. lean-agent-jail copies it into every chroot.
+SECCOMP_SRC="$rel" "$ROOT/scripts/seccomp-filter.sh" "$tmp/seccomp-filter.bpf"
+install -o root -g root -m 0644 "$tmp/seccomp-filter.bpf" "$LIB/seccomp-filter.bpf"
+install -o root -g root -m 0644 "$tmp/seccomp-filter.json" "$LIB/seccomp-filter.json"
 install -o root -g root -m 0755 "$ROOT/scripts/lean-agent-jail" "$WRAPPER"
 
 home="$(getent passwd "$OWNER" | cut -d: -f6)"
