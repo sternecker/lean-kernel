@@ -4,7 +4,13 @@
 #   agent-selftest root    run by init as root: mounts, sysctls, bridge
 #   agent-selftest agent   run by init through the agent's own jail-exec policy, as the agent
 # Prints "SELFTEST PASS|FAIL <who> <name>: <detail>" lines and exits with the number of failures.
+# Run by hand from inside a session (the agent's Bash tool), the agent pass still works, with two differences
+# it reports itself: AGENT_UID is not in the environment (defaulted below), and the script runs under the
+# tool shell, so the checks on the agent process's own MDWE/JIT posture are skipped with a NOTE line.
 who="${1:?root or agent}"
+# init exports AGENT_UID. By hand it is unset: default to the owner of the agent's home, the uid the image was
+# built for (otherwise the uid and hidepid checks compare against an empty string and fail for no reason).
+AGENT_UID="${AGENT_UID:-$(stat -c %u /home/agent 2>/dev/null || echo 10000)}"
 fails=0
 ok()  { echo "SELFTEST PASS $who $1: $2"; }
 bad() { echo "SELFTEST FAIL $who $1: $2"; fails=$((fails + 1)); }
@@ -47,6 +53,15 @@ if [ "$who" = root ]; then
 fi
 
 # --- as the agent, inside jail-exec ---
+# init runs this pass through bash.real, like Claude Code itself, so MDWE is off on entry and the two checks
+# on the agent process's own posture (no MDWE, in-process JIT) measure the agent. Started from the Bash tool
+# it runs under the tool shell, MDWE is already on, and those two checks would measure the tool shell
+# instead: say so once and skip them. make agent-test is where they count.
+under_tool_shell=0
+if [ "$(jit-probe --get-mdwe 2>/dev/null)" = 1 ]; then
+  under_tool_shell=1
+  echo "SELFTEST NOTE $who running under the tool shell (PR_GET_MDWE=1 on entry): the agent process's own MDWE and in-process JIT checks are skipped, they would measure the tool shell, not the agent; make agent-test runs them as init does"
+fi
 check "uid" "$([ "$(id -u)" = "$AGENT_UID" ] && echo 1 || echo 0)" "$(id)"
 caps="$(grep -E '^Cap(Inh|Prm|Eff|Bnd|Amb):' /proc/self/status | awk '{print $2}' | sort -u)"
 check "no capabilities" "$([ "$caps" = 0000000000000000 ] && echo 1 || echo 0)" "$(echo $caps)"
@@ -104,8 +119,10 @@ if [ "$agent_exec" != 1 ]; then
   check "tool shell has MDWE set" "$([ "$v" = 1 ] && echo 1 || echo 0)" "PR_GET_MDWE=$v"
   v="$(/bin/bash -c '/bin/bash.real -c "jit-probe --get-mdwe"' 2>&1)"
   check "MDWE inherited through bash.real" "$([ "$v" = 1 ] && echo 1 || echo 0)" "PR_GET_MDWE=$v"
-  v="$(jit-probe --get-mdwe 2>&1)"
-  check "agent process itself has no MDWE (it is a JIT; known gap)" "$([ "$v" = 0 ] && echo 1 || echo 0)" "PR_GET_MDWE=$v"
+  if [ $under_tool_shell = 0 ]; then
+    v="$(jit-probe --get-mdwe 2>&1)"
+    check "agent process itself has no MDWE (it is a JIT; known gap)" "$([ "$v" = 0 ] && echo 1 || echo 0)" "PR_GET_MDWE=$v"
+  fi
 else
   /bin/bash -c jit-probe >/dev/null 2>&1; rc=$?
   check "tool shell JIT allowed (agent_exec=1)" "$([ $rc = 0 ] && echo 1 || echo 0)" "jit-probe exit $rc"
@@ -116,9 +133,11 @@ fi
 # JIT), and no kernel option enforces userspace W^X. Tool shells are covered by the launcher above; this
 # records the main process. jit-probe returns 0 when JIT works. We record 0 as the expected state; the
 # day it flips to 1 the policy changed and this line (and the docs) must be revisited.
-jit-probe >/dev/null 2>&1; jrc=$?
-check "in-process JIT works (W^X NOT enforced; known, see HOWTO 9.5)" "$([ $jrc = 0 ] && echo 1 || echo 0)" \
-  "jit-probe exit $jrc ($([ $jrc = 0 ] && echo 'anonymous PROT_EXEC allowed' || echo 'blocked/inconclusive -- policy changed, revisit docs'))"
+if [ $under_tool_shell = 0 ]; then
+  jit-probe >/dev/null 2>&1; jrc=$?
+  check "in-process JIT works (W^X NOT enforced; known, see HOWTO 9.5)" "$([ $jrc = 0 ] && echo 1 || echo 0)" \
+    "jit-probe exit $jrc ($([ $jrc = 0 ] && echo 'anonymous PROT_EXEC allowed' || echo 'blocked/inconclusive -- policy changed, revisit docs'))"
+fi
 
 # Socket families: jail-exec's seccomp allows AF_UNIX, AF_INET and AF_INET6 only (--vsock is the bridge's,
 # not the agent's). AF_VSOCK is the guest-host channel; AF_NETLINK is kernel configuration surface.
