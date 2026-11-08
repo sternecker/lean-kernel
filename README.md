@@ -1,6 +1,6 @@
 # lean-kernel AI JAIL
 
-Currently Debian focused. A minimal, hardened Linux guest kernel for running untrusted AI agents in Firecracker microVMs, one VM per agent, and a jailed setup that runs Claude Code in one: the credential stays in a host-side proxy, never in the VM.
+A minimal, hardened Linux guest kernel for running untrusted AI agents in Firecracker microVMs, one VM per agent, and a jailed setup that runs Claude Code in one: the credential stays in a host-side proxy, never in the VM.
 
 The point: an agent that processes attacker-controlled content should not share a kernel with the host. Landlock + seccomp + an egress proxy bound what a compromised *process* can do; they are all enforced by the kernel and do not survive a kernel privilege-escalation bug. A separate, tiny guest kernel turns a kernel escape into a VM escape, a much rarer bug class, and a guest kernel with 40 drivers instead of 4,000 carries fewer of the bugs in the first place.
 
