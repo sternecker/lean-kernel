@@ -15,7 +15,9 @@ Passed:
     (DECCOLM ?3: 132 columns) or make the terminal wait on the guest (?1001: xterm hilite mouse tracking,
     which hangs xterm unless the program answers every click), and any CSI with a numeric parameter of
     six or more digits (REP: CSI 1000000000 b asks for a billion cells; nothing the TUI sends is that big)
-  - two-character ESC sequences (ESC 7, ESC =, ESC ( B, ...)
+  - two-character ESC sequences (ESC 7, ESC =, ESC ( B, ...), except ESC % x (character set switch: ESC % @
+    takes xterm out of UTF-8 mode, where the trailing byte of many UTF-8 characters, such as 0x9D in U+015D,
+    is an 8-bit C1 control like OSC, which this filter only strips as characters)
   - OSC 0/1/2 (window title), with control and bidi characters removed from the title
   - OSC 10/11/12 ;? (foreground/background/cursor colour queries; the reply holds only colour values)
 
@@ -59,11 +61,14 @@ MAX_OSC = 512    # longest OSC payload kept; longer ones are dropped (titles are
 # CSI Ps t window operations that only report sizes (numbers). Not 22/23 (title push/pop): the filter
 # owns the title stack for the session (START/RESET below), and a guest pop would unbalance it.
 WINOPS_OK = {"14", "16", "18"}
-# DECSET/DECRST private modes dropped whatever the final byte: 2 (DECANM: ?2l puts xterm into VT52 mode, a
-# different parser, after which nothing below resets it), 3 (DECCOLM: resizes to 132/80 columns and
-# clears the screen) and 1001 (hilite mouse tracking: on a click xterm ignores all X events until the
-# program replies with CSI ... T; ctlseqs: "requires a cooperating program, else xterm will hang").
-MODES_DENY = {"2", "3", "1001"}
+# DECSET/DECRST private modes (CSI ? Pm h / l) that pass: an allowlist, every other private mode is dropped
+# (2 DECANM: ?2l puts xterm into VT52 mode, a parser nothing resets; 3 DECCOLM: resizes and clears; 1001 hilite
+# mouse tracking: xterm hangs until the program replies; 9001 Windows Terminal key encoding; ...). Each
+# allowed mode is one RESET turns off or DECSTR restores: 1 cursor keys, 6 origin, 7 autowrap, 25 cursor,
+# 47/1047/1049 alternate screen, 66 keypad, 1000-1007 and 1015 mouse and alternate scroll, 1004 focus,
+# 2004 bracketed paste, 2026 synchronized output. (1001 is in RESET only; the guest cannot enable it.)
+MODES_OK = {"1", "6", "7", "25", "47", "66", "1000", "1002", "1003", "1004", "1005", "1006", "1007", "1015",
+            "1047", "1049", "2004", "2026"}
 # A CSI with any numeric parameter of this many digits or more is dropped. Legitimate parameters are
 # small (colours <= 255, positions and modes < 10000); a huge one is amplification: REP (CSI Ps b) with
 # Ps = 1000000000 repeats a character a billion times, which has hung or crashed terminals.
@@ -75,6 +80,7 @@ RESET = (
     "\x1b[!p"        # DECSTR soft reset: scroll region, insert/origin/autowrap, cursor keys, keypad, SGR, cursor
     "\x1b[r"         # scroll region (again, for terminals without DECSTR)
     "\x1b[0m"        # attributes
+    "\x1b%G"         # UTF-8 mode (in case the guest left it: ESC % @ is dropped, but be sure)
     "\x1b(B"         # G0 = ASCII (undo ESC ( 0 line drawing)
     "\x1b[20l"       # newline mode off (LNM is not in DECSTR)
     "\x1b[>4;0m"     # modifyOtherKeys off (xterm; not in DECSTR)
@@ -143,7 +149,8 @@ class Filter:
             if 0x20 <= o <= 0x2F and len(self.buf) < 4:
                 self.buf.append(c)
             elif 0x30 <= o <= 0x7E:
-                out.append(ESC + "".join(self.buf) + c)
+                if "%" not in self.buf:   # ESC % @ leaves UTF-8 mode (C1 bytes become controls): dropped
+                    out.append(ESC + "".join(self.buf) + c)
                 self.state = GROUND
             else:
                 self.state = GROUND
@@ -208,8 +215,12 @@ class Filter:
                 return
             if params.split(";")[0] not in WINOPS_OK:
                 return
-        if final in "hl" and params[:1] == "?" and MODES_DENY & set(params[1:].split(";")):
-            return
+        if final in "hl" and not inter:
+            if params[:1] == "?":
+                if not set(params[1:].split(";")) <= MODES_OK:
+                    return
+            elif params[:1] in ("<", "=", ">"):
+                return
         out.append(ESC + "[" + body + final)
 
     @staticmethod

@@ -86,7 +86,7 @@ APPENDIX = [
     (f"{E}[0i\x07{E}[5i\x07", "\x07\x07"),
     # hijack the mouse: every mode passes except 1001 (hilite tracking hangs xterm without a cooperating program)
     (f"{E}[?1001h{E}[?1002h{E}[?1003h{E}[?1004h{E}[?1005h{E}[?1006h{E}[?1007h{E}[?1015h{E}[?10016h",
-     f"{E}[?1002h{E}[?1003h{E}[?1004h{E}[?1005h{E}[?1006h{E}[?1007h{E}[?1015h{E}[?10016h"),
+     f"{E}[?1002h{E}[?1003h{E}[?1004h{E}[?1005h{E}[?1006h{E}[?1007h{E}[?1015h"),
     (f"{E}[?1001l{E}[?1;1001h", ""),
     # REP: ten repeats pass; a billion (the "bricked" slide, plain and URL-encoded with U+FE0F) is dropped
     (f"\u270c{E}[10;b\x07", f"\u270c{E}[10;b\x07"),
@@ -158,6 +158,23 @@ for seq in (f"{E}[>4;0m", f"{E}[20l", f"{E}[?1l", f"{E}>", f"{E}[?1049l", f"{E}[
     if seq not in cf.RESET:
         failed += 1
         print(f"FAIL RESET lacks {seq!r}")
+
+# ESC % @ (leave UTF-8 mode) is dropped, so "ŝ" (C5 9D) can never be read as an 8-bit OSC.
+for seq in (f"{E}%@", f"{E}%G", f"{E}%/G"):
+    out = cf.Filter().feed(f"{seq}ŝ52;c;QUJD\x07")
+    if "%" in out:
+        failed += 1
+        print(f"FAIL charset switch {seq!r} -> {out!r}")
+if f"{E}%G" not in cf.RESET:
+    failed += 1
+    print("FAIL RESET lacks UTF-8 mode")
+
+# Private modes are an allowlist: unknown ones (9001, 10016) are dropped whole, even beside an allowed one.
+for seq, want in ((f"{E}[?9001h", ""), (f"{E}[?10016h", ""), (f"{E}[?25;9001l", ""), (f"{E}[?1049;25h", f"{E}[?1049;25h")):
+    got = cf.Filter().feed(seq)
+    if got != want:
+        failed += 1
+        print(f"FAIL mode allowlist {seq!r} -> {got!r}")
 
 print("console-filter: ok" if not failed else f"console-filter: {failed} failed")
 sys.exit(1 if failed else 0)

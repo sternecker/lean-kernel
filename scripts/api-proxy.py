@@ -376,10 +376,12 @@ class UpstreamConnection(http.client.HTTPSConnection):
                 raw = socket.create_connection((ip, self.port), self.timeout)
                 self.sock = TLS.wrap_socket(raw, server_hostname=UPSTREAM)
                 return
-            except OSError as e:
+            except BaseException as e:
                 # A failed handshake leaves raw open (wrap_socket doesn't close it on error).
                 if raw is not None:
                     raw.close()
+                if not isinstance(e, OSError):
+                    raise
                 err = e
         raise err
 BUDGET = Budget(0, 0, 0, 0, "")

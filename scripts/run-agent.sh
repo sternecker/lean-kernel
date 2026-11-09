@@ -223,7 +223,8 @@ if [[ "$mode" == headless || "$mode" == selftest ]]; then
   show_fclog
   # Printed by init after the agent exits: whether Claude Code loaded the image's managed settings.
   grep -m1 '^MANAGED-HOOKS=' "$log" | sed 's/^/managed settings: /; s/MANAGED-HOOKS=//' || true   # absent in selftest mode
-  grep -q 'Kernel panic' "$log" && die "guest panicked; see $log"
+  # Agent output lines start with "| "; skip them so an agent that merely mentions a panic is not one.
+  grep -v '^| ' "$log" | grep -q 'Kernel panic' && die "guest panicked; see $log"
   if [[ "$mode" == selftest ]]; then
     [[ "$(agent_exit)" == AGENT-EXIT=0 ]] || die "agent self-test failed (SELFTEST FAIL lines above); see $log"
     echo "agent-test: ok ($(grep -c '^SELFTEST PASS' "$log") checks)"
