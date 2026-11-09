@@ -558,7 +558,9 @@ killer has to choose and init and the bridge survive to report the exit; the out
 fixed-size drives (512 MiB home, 256 MiB `/tmp`), and the host cgroup around Firecracker. cgroupfs is root-owned and
 `/sys` has no Landlock write rule, so the agent can't move itself out.
 Inside the guest, `jail-exec` caps the agent's uid at 512 processes and threads (`--nproc`, `RLIMIT_NPROC`), so a
-runaway agent can't starve init or the bridge, which run as other uids.
+runaway agent can't starve init or the bridge, which run as other uids. The bridge is bounded too: socat forks one
+child per connection, capped at 16 (`max-children=16`, the host proxy's own connection limit); a 17th connection
+waits in the listen backlog, and the bridge's uid is capped at 32 processes as a backstop.
 
 **Proxy egress.** The wrapper resolves `api.anthropic.com` as root and passes the addresses to the proxy, which connects
 to them directly. It still verifies TLS for the name, so it needs no DNS. The nftables table `inet lean_agent`, created on

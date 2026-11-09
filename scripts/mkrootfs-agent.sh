@@ -234,7 +234,11 @@ export T
 # vsock, may write nothing, and (--mdwe) can't make memory executable: socat parses what the agent sends
 # it, and a compromised socat gets no JIT either. No -d flag: without one socat prints errors only, on both
 # 1.7 (RHEL 10) and 1.8 (Debian 13); -d0 is a 1.8 spelling of the same and 1.7 rejects it with its usage text.
-$TS /bin/jail-exec --bind 8080 --vsock --mdwe 65534 /usr/bin/socat TCP-LISTEN:8080,bind=127.0.0.1,reuseaddr,fork VSOCK-CONNECT:2:8080 &
+# max-children=16 matches the host proxy's connection limit (api-proxy.py, Server.max_connections): one
+# forked socat per open connection, and a 17th waits in the listen backlog (backlog=16) instead of forking
+# a child the proxy would close at once. So an agent that opens connections in a loop can't fork socat
+# without bound; --nproc 32 (parent + 16 children, with room) is the backstop should either bound fail.
+$TS /bin/jail-exec --bind 8080 --vsock --mdwe --nproc 32 65534 /usr/bin/socat TCP-LISTEN:8080,bind=127.0.0.1,reuseaddr,backlog=16,fork,max-children=16 VSOCK-CONNECT:2:8080 &
 bridge=$!
 i=0; while ! grep -q ':1F90 00000000:0000 0A' /proc/net/tcp; do
   i=$((i+1)); [ $i -gt 50 ] && fail "bridge did not start"; sleep 0.1
