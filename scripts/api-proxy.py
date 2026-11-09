@@ -385,7 +385,10 @@ class UpstreamConnection(http.client.HTTPSConnection):
                 err = e
         raise err
 BUDGET = Budget(0, 0, 0, 0, "")
-TLS = ssl.create_default_context()
+TLS = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+TLS.check_hostname = True
+TLS.verify_mode = ssl.CERT_REQUIRED
+TLS.load_default_certs()
 TLS.minimum_version = ssl.TLSVersion.TLSv1_2
 TLS.options |= ssl.OP_NO_TLSv1
 TLS.options |= ssl.OP_NO_TLSv1_1
