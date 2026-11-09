@@ -9,3 +9,4 @@ vm/vm.json
 /firecracker.sock
 /vsock.sock
 out-*/
+__pycache__/

@@ -125,19 +125,37 @@ def _tool_why(t):
     return None
 
 
-# Keys whose value is a JSON Schema (a client tool's input_schema, output_format's schema): a schema may
-# legitimately describe a property called "source" with a "type", and the server never fetches anything
-# from a schema, so these subtrees are not walked. Everything else in the request is.
-SCHEMA_KEYS = frozenset({"input_schema", "schema"})
+# Where a JSON Schema legitimately appears: a client tool definition's "input_schema", and the "schema" of
+# an output format. A schema may describe a property called "source" with a "type", and the server never
+# fetches anything from one, so those two subtrees are not walked. The same key anywhere else (say inside
+# a content block) is walked like everything else. _walk tracks where it is with `kind`:
+#   "tools"         the top-level tools list (its items are "tool")
+#   "tool"          a tool definition: skip its input_schema
+#   "output_config" skip nothing, but its "format" is a "format"
+#   "format"        an output format: skip its schema
+_TOP_KINDS = {"tools": "tools", "output_format": "format", "output_config": "output_config"}
+_SCHEMA_KEY = {"tool": "input_schema", "format": "schema"}
 
 
-def _walk(v, depth=0):
-    """Return a reason if anything nested in v points the server at something to fetch."""
+def _child_kind(kind, v, k):
+    if kind == "top":
+        return _TOP_KINDS.get(k)
+    if kind == "output_config" and k == "format":
+        return "format"
+    # A tool added mid-conversation: tool_definition carries a full definition.
+    if kind is None and v.get("type") == "tool_definition" and k == "definition":
+        return "tool"
+    return None
+
+
+def _walk(v, depth=0, kind="top"):
+    """Return a reason if anything nested in v points the server at something to fetch. kind says
+    which schema-bearing place v is (see above); the caller passes the request itself as "top"."""
     if depth > MAX_DEPTH:
         return "body nested too deeply"
     if isinstance(v, list):
         for x in v:
-            why = _walk(x, depth + 1)
+            why = _walk(x, depth + 1, "tool" if kind == "tools" else None)
             if why:
                 return why
     elif isinstance(v, dict):
@@ -158,12 +176,13 @@ def _walk(v, depth=0):
             if why:
                 return why
         # A tool call's arguments are the agent's own JSON, not content blocks: a parameter that
-        # happens to be called "source" there means nothing to the server. Schemas likewise.
-        skip = "input" if v.get("type") in ("tool_use", "server_tool_use") else None
+        # happens to be called "source" there means nothing to the server. Schemas likewise, in the
+        # two places _walk's comment names.
+        skip = "input" if v.get("type") in ("tool_use", "server_tool_use") else _SCHEMA_KEY.get(kind)
         for k, x in v.items():
-            if k == skip or k in SCHEMA_KEYS:
+            if k == skip:
                 continue
-            why = _walk(x, depth + 1)
+            why = _walk(x, depth + 1, _child_kind(kind, v, k))
             if why:
                 return why
     return None
@@ -211,7 +230,7 @@ def body_policy(body):
             return why, req
     # Sources and tool definitions anywhere in the request, not just in messages and system: a field that
     # grows a place for a content block later is covered without anyone noticing it first. Only schemas
-    # (SCHEMA_KEYS) and tool-call arguments are skipped.
+    # (in a tool definition or an output format) and tool-call arguments are skipped.
     why = _walk(req)
     if why:
         return why, req
@@ -352,11 +371,15 @@ class UpstreamConnection(http.client.HTTPSConnection):
             return super().connect()
         err = None
         for ip in ADDRS:
+            raw = None
             try:
                 raw = socket.create_connection((ip, self.port), self.timeout)
                 self.sock = TLS.wrap_socket(raw, server_hostname=UPSTREAM)
                 return
             except OSError as e:
+                # A failed handshake leaves raw open (wrap_socket doesn't close it on error).
+                if raw is not None:
+                    raw.close()
                 err = e
         raise err
 BUDGET = Budget(0, 0, 0, 0, "")

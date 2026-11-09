@@ -53,6 +53,7 @@ tests/probe.c            in-guest probe: tries every cut as root, as a user, and
 tests/console-filter-test.py  console-filter.py cases, split-read and fuzz checks
 tests/api-proxy-test.py  api-proxy.py header, beta and body policy cases
 tests/seccomp-test.py    the seccomp filter in api-proxy.py and console-filter.py
+tests/tool-shell-test.py   the seccomp filter in guest/tool-shell.c, alone (built without MDWE; probe in tests/tool-shell-probe.c)
 guest/jail-exec.c        in-guest launcher: drop to the agent uid, no_new_privs, Landlock, seccomp allowlist, exec
 guest/jit-probe.c        posture probe: can this process get writable+executable memory (anonymous, or a private file mapping)
 guest/tool-shell.c       /bin/bash in the agent image: PR_SET_MDWE (kernel W^X) + a seccomp backstop, then the real bash

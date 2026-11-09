@@ -65,6 +65,9 @@
 int main(int argc, char **argv)
 {
 	(void)argc;
+	// TOOL_SHELL_TEST_NO_MDWE is only for tests/tool-shell-test.py, which builds a copy without layer 1
+	// so the seccomp filter is checked on its own. The shipped build (mkrootfs-agent.sh) never sets it.
+#ifndef TOOL_SHELL_TEST_NO_MDWE
 	// 1. MDWE first: from here on this process can't create W+X memory, and neither can bash or
 	// anything bash runs. Verified by reading it back; a kernel without it (before 6.3) fails closed.
 	if (prctl(PR_SET_MDWE, PR_MDWE_REFUSE_EXEC_GAIN, 0, 0, 0)) {
@@ -75,6 +78,7 @@ int main(int argc, char **argv)
 		fprintf(stderr, "tool-shell: MDWE did not take effect\n");
 		return 127;
 	}
+#endif
 	// 2. The seccomp backstop.
 	struct sock_filter f[] = {
 		LOAD(arch),
@@ -88,7 +92,7 @@ int main(int argc, char **argv)
 		EQ(SYS_mmap, 0, 7),
 		LOAD(args[2]),
 		SET(PROT_EXEC, 0, 5),
-		SET(PROT_WRITE, 3, 0),
+		SET(PROT_WRITE, 2, 0),
 		LOAD(args[3]),
 		SET(MAP_ANONYMOUS, 0, 1),
 		RET(SECCOMP_RET_ERRNO | EPERM),
