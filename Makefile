@@ -1,11 +1,15 @@
 # lean-kernel: minimal hardened Firecracker guest kernel.
 # Every target is a thin wrapper over scripts/; run the script directly for options.
 
-.PHONY: all distro deps fetch config build check syscalls rootfs run test agent-rootfs agent agent-test sbom clean distclean
+.PHONY: all version distro deps fetch config build check syscalls rootfs run test agent-rootfs agent agent-test sbom clean distclean
 
 # Every step that needs no input and spends no tokens, in order; see scripts/all.sh (--vsock, --no-agent).
 all:
 	@scripts/all.sh
+
+# The AI JAIL's version, the commit, and every pin in VERSION; paste it into a bug or security report.
+version:
+	@scripts/version.sh
 
 # Which distro family (debian/rhel) the scripts detected; every target stops on an unsupported host.
 distro:

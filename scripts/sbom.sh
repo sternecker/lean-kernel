@@ -25,7 +25,8 @@ out_base="$OUT/agent-sbom"
 formats="${SBOM_FORMAT:-spdx-json=$out_base.spdx.json cyclonedx-json=$out_base.cdx.json}"
 
 # Build the Syft output args. Default specs carry their own path; a bare format name gets a default one.
-out_args=()
+# The document names the image after this repo and its version (VERSION), so an SBOM can be matched to a release.
+out_args=(--source-name lean-kernel-agent-image --source-version "$LEAN_KERNEL_VERSION")
 for f in ${formats//,/ }; do
   case "$f" in
     *=*) out_args+=(-o "$f") ;;

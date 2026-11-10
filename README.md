@@ -13,7 +13,9 @@ The point: an agent that processes attacker-controlled content should not share 
 ## Layout
 
 ```
-VERSION                  pinned kernel, Firecracker, and base-config versions
+VERSION                  the AI JAIL's version (LEAN_KERNEL_VERSION) and the pinned kernel, Firecracker, Claude Code and
+                         checker versions; `make version` prints them all
+SECURITY.md              how to report a vulnerability, what is in scope, what goes upstream instead
 LICENSE                  Apache-2.0 (this project's own source)
 THIRD-PARTY.md           licenses of the components the build fetches and the image bundles
 HOWTO.md                 the procedure; NOTES.md the reasoning
@@ -28,6 +30,7 @@ configs/
 scripts/
   _env.sh                shared settings for every script (paths, toolchain, VERSION)
   all.sh                 make all: every non-interactive step in order, with a timing summary
+  version.sh             make version: LEAN_KERNEL_VERSION, the commit, and every pin, for a report
   distro-check.sh        which distro family the host is (debian/rhel); every target stops on anything else
   deps-check.sh          what's missing on this host
   fetch-kernel.sh        download + verify the pinned longterm tarball into work/, apply patches/
@@ -72,6 +75,7 @@ out/                     bzImage, vmlinux + System.map, .config, images; runs/<i
 ```sh
 make all       # every step below that needs no input and spends no tokens, stopping at the first failure
                # (scripts/all.sh --vsock adds the vsock-only profile; --no-agent skips the agent steps)
+make version   # the AI JAIL's version, the commit, and every pin in VERSION (paste into a report)
 make distro    # detected distro family (debian or rhel); LEAN_DISTRO=debian|rhel overrides detection
 make deps      # lists missing packages; prints the apt (Debian family) or dnf (RHEL family) line
 make fetch     # kernel tarball, sha256 verified against kernel.org, then patches/ applied
