@@ -1,0 +1,73 @@
+# vmware.fragment: applied after lean.fragment (and llvm.fragment) when VMWARE=1.
+# A guest for hypervisors that present PCI + ACPI hardware instead of Firecracker's virtio-mmio: VMware
+# Workstation/Fusion/ESXi, and QEMU/KVM with the pc or q35 machine (libvirt's defaults).
+# Not combinable with VSOCK_ONLY=1: VMware guests have no vsock, so the NIC is the only way out.
+#
+# Boot model: GRUB (BIOS or EFI) loads the kernel and an initramfs holding the whole root filesystem
+# from the ISO. The kernel never reads the ISO, so there is NO storage driver in this profile: no SCSI,
+# ATA, NVMe, no ISO9660. A disk or CD driver is a bigger attack surface than the NIC, and a guest with
+# no disk has nothing persistent to tamper with. The price is that the root lives in RAM.
+
+# Bus and interrupt plumbing. PCI needs ACPI on x86 to find the host bridge and route interrupts, and
+# ACPI is also how the hypervisor's reboot reaches the kernel (reboot=acpi).
+CONFIG_PCI=y
+CONFIG_PCI_MSI=y
+CONFIG_ACPI=y
+
+# ACPI's defaults pull the input and thermal subsystems back in, which lean.fragment cuts. Turn off the
+# pieces that do: the power/sleep button driver needs INPUT, and the processor, thermal and video drivers
+# select THERMAL. A VM needs none of them (no C-state tables, no fans, no lid). The cost: the hypervisor's
+# "shut down guest" (a power-button event) does nothing; use a hard power off, or run `poweroff -f` inside.
+# CONFIG_ACPI_BUTTON is not set
+# CONFIG_ACPI_PROCESSOR is not set
+# CONFIG_ACPI_THERMAL is not set
+# CONFIG_ACPI_VIDEO is not set
+
+# initramfs root. Must be an initramfs, not a block device.
+CONFIG_BLK_DEV_INITRD=y
+CONFIG_RD_GZIP=y
+CONFIG_TMPFS=y
+
+# NICs. vmxnet3 is VMware's paravirtual NIC (the recommended choice); virtio-pci is the same NIC the
+# base config already has, on the PCI transport, for QEMU/KVM. e1000e (VMware's default for some guest
+# types) is deliberately left out: pick vmxnet3 in the VM's settings.
+CONFIG_VMXNET3=y
+CONFIG_VIRTIO_PCI=y
+
+# Console: serial only (CONFIG_SERIAL_8250_CONSOLE is already in lean.fragment). A VGA text console needs
+# CONFIG_VT, and VT selects INPUT (keyboard/event handling), which lean.fragment cuts. So the VM needs a
+# serial port, and VMware does not add one by default: add one in the VM settings (Serial Port -> a file,
+# a named pipe, or a network socket) or you will see no output. Boot args: console=ttyS0,115200.
+
+# EFI boot via the kernel's own stub (GRUB can also chain-load it). No framebuffer console, same reason.
+CONFIG_EFI=y
+CONFIG_EFI_STUB=y
+
+# Defaults that PCI, ACPI and EFI switch on, and a VM does not need. Each is a cut, verified by configure.sh:
+# no PCI hotplug or ASPM (nothing is hot-added; the hypervisor presents a fixed bus), no EFI variable
+# filesystem or pstore (the guest has no business writing firmware variables), no legacy (pre-1.0) virtio-pci,
+# no PCI serial-card variants (the 16550 at the standard port is what a hypervisor provides), no host-CPU perf
+# uncore/RAPL drivers, no vendor RNG drivers (virtio-rng and RDRAND cover entropy), no PNP debug messages.
+# CONFIG_HOTPLUG_PCI is not set
+# CONFIG_PCIEASPM is not set
+# CONFIG_EFIVAR_FS is not set
+# CONFIG_EFI_VARS_PSTORE is not set
+# CONFIG_VIRTIO_PCI_LEGACY is not set
+# CONFIG_SERIAL_8250_PCI is not set
+# CONFIG_SERIAL_8250_EXAR is not set
+# CONFIG_SERIAL_8250_LPSS is not set
+# CONFIG_SERIAL_8250_MID is not set
+# CONFIG_SERIAL_8250_PERICOM is not set
+# CONFIG_PERF_EVENTS_INTEL_UNCORE is not set
+# CONFIG_PERF_EVENTS_INTEL_RAPL is not set
+# CONFIG_PERF_EVENTS_INTEL_CSTATE is not set
+# CONFIG_HW_RANDOM_INTEL is not set
+# CONFIG_HW_RANDOM_AMD is not set
+# CONFIG_PNP_DEBUG_MESSAGES is not set
+
+# Deliberately NOT here, so a later reader doesn't add them to "make it work":
+#  - VMWARE_VMCI / VMW_VSOCK_VMCI_TRANSPORT (VMware's vsock): a second host-guest channel, and a driver with
+#    its own CVE history. Egress goes through the NIC to the host proxy instead.
+#  - VMWARE_BALLOON, VMWARE_PVSCSI, vmwgfx/DRM, VMware shared folders: ballooning and display/disk
+#    conveniences with no use here.
+#  - Any storage or CD-ROM driver (see above).

@@ -5,8 +5,7 @@
 source "$(dirname "$0")/_env.sh"
 
 [[ -f "$OUT/.config" ]] || die "no out/.config; run make config"
-profile="lean"; [[ "$VSOCK_ONLY" == "1" ]] && profile="lean-vsock"
-verified="$OUT/$profile-$KERNEL_VERSION.config"
+verified="$OUT/$PROFILE-$KERNEL_VERSION.config"
 [[ -f "$verified" ]] || die "no $verified (the copy make config verified); run make config"
 # The build reruns Kconfig whenever the toolchain differs from the one make config used (another
 # compiler, LLVM=0, a newer clang picked up by _env.sh) and can silently drop options that depend
