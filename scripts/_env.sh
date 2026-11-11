@@ -86,10 +86,10 @@ pkg() { if [[ "$DISTRO_FAMILY" == rhel ]]; then echo "${2:-$1}"; else echo "$1";
 
 # VSOCK_ONLY=1 adds vsock-only.fragment: no TCP/IP, no NIC driver in the guest.
 VSOCK_ONLY="${VSOCK_ONLY:-0}"
-# VMWARE=1 adds vmware.fragment: PCI + ACPI, vmxnet3/virtio-pci, VGA console, EFI stub, no storage drivers.
+# VMWARE=1 adds vmware.fragment: PCI + ACPI, virtio-pci, serial console, EFI stub; no storage drivers, no NIC, no TCP/IP.
 # For VMware and QEMU/KVM pc/q35 guests booted from an ISO; not combinable with VSOCK_ONLY=1.
 VMWARE="${VMWARE:-0}"
-[[ "$VMWARE" == "1" && "$VSOCK_ONLY" == "1" ]] && { echo "error: VMWARE=1 and VSOCK_ONLY=1 cannot be combined (VMware guests have no vsock, the NIC is their only way out)" >&2; exit 1; }
+[[ "$VMWARE" == "1" && "$VSOCK_ONLY" == "1" ]] && { echo "error: VMWARE=1 and VSOCK_ONLY=1 cannot be combined (the VMware profile already has no NIC and no TCP/IP, so VSOCK_ONLY adds nothing)" >&2; exit 1; }
 # PROFILE names the config and artifacts: lean, lean-vsock or lean-vmware.
 PROFILE="lean"
 [[ "$VSOCK_ONLY" == "1" ]] && PROFILE="lean-vsock"

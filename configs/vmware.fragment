@@ -1,7 +1,8 @@
 # vmware.fragment: applied after lean.fragment (and llvm.fragment) when VMWARE=1.
 # A guest for hypervisors that present PCI + ACPI hardware instead of Firecracker's virtio-mmio: VMware
 # Workstation/Fusion/ESXi, and QEMU/KVM with the pc or q35 machine (libvirt's defaults).
-# Not combinable with VSOCK_ONLY=1: VMware guests have no vsock, so the NIC is the only way out.
+# This profile has NO network at all: no NIC driver and no TCP/IP stack (see "No network" below). That
+# already includes everything vsock-only.fragment cuts, so VSOCK_ONLY=1 adds nothing and is refused.
 #
 # Boot model: GRUB (BIOS or EFI) loads the kernel and an initramfs holding the whole root filesystem
 # from the ISO. The kernel never reads the ISO, so there is NO storage driver in this profile: no SCSI,
@@ -28,11 +29,19 @@ CONFIG_BLK_DEV_INITRD=y
 CONFIG_RD_GZIP=y
 CONFIG_TMPFS=y
 
-# NICs. vmxnet3 is VMware's paravirtual NIC (the recommended choice); virtio-pci is the same NIC the
-# base config already has, on the PCI transport, for QEMU/KVM. e1000e (VMware's default for some guest
-# types) is deliberately left out: pick vmxnet3 in the VM's settings.
-CONFIG_VMXNET3=y
+# virtio on the PCI transport, for QEMU/KVM q35 (the base config already has the virtio-blk, -console,
+# -rng and vsock drivers on the mmio transport). VMware has none of these devices.
 CONFIG_VIRTIO_PCI=y
+
+# No network. A NIC driver is code that parses whatever a virtual device hands it, and the TCP/IP stack
+# is code that parses whatever arrives; this profile has neither, so there is nothing to attack and
+# nothing for a compromised process to reach out through. The guest still has Unix sockets and, on KVM,
+# vsock. The VM may still have a virtual NIC attached in its settings: the guest has no driver for it
+# (VMware's vmxnet3 and e1000e) and ignores it. Adding a NIC later is: CONFIG_VMXNET3=y here, drop the
+# three cuts below.
+# CONFIG_VIRTIO_NET is not set
+# CONFIG_INET is not set
+# CONFIG_PACKET is not set
 
 # Console: serial only (CONFIG_SERIAL_8250_CONSOLE is already in lean.fragment). A VGA text console needs
 # CONFIG_VT, and VT selects INPUT (keyboard/event handling), which lean.fragment cuts. So the VM needs a
@@ -67,7 +76,7 @@ CONFIG_EFI_STUB=y
 
 # Deliberately NOT here, so a later reader doesn't add them to "make it work":
 #  - VMWARE_VMCI / VMW_VSOCK_VMCI_TRANSPORT (VMware's vsock): a second host-guest channel, and a driver with
-#    its own CVE history. Egress goes through the NIC to the host proxy instead.
+#    its own CVE history.
 #  - VMWARE_BALLOON, VMWARE_PVSCSI, vmwgfx/DRM, VMware shared folders: ballooning and display/disk
 #    conveniences with no use here.
 #  - Any storage or CD-ROM driver (see above).

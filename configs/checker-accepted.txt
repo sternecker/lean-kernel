@@ -40,3 +40,4 @@ CONFIG_SYN_COOKIES                vsock  no TCP in this profile, so no listener 
 # is already the trust root.
 CONFIG_EFI_DISABLE_PCI_DMA        vmware no malicious PCI card to stop at boot: the "devices" are the hypervisor's emulation; also known to break some firmware
 CONFIG_RESET_ATTACK_MITIGATION    vmware cold-boot/RAM-remanence defense for physical machines (asks firmware to wipe RAM after a forced reboot); a VM's RAM is the hypervisor's
+CONFIG_SYN_COOKIES                vmware no TCP in this profile (no TCP/IP stack at all), so no listener to SYN-flood
