@@ -231,8 +231,10 @@ fi
 export T
 
 # localhost:8080 -> host proxy over vsock. Runs as nobody in its own jail: may bind TCP 8080 and use
-# vsock, may write nothing, and (--mdwe) can't make memory executable: socat parses what the agent sends
-# it, and a compromised socat gets no JIT either. No -d flag: without one socat prints errors only, on both
+# vsock, may write nothing, and (--mdwe) can't make memory executable. socat does not parse the payload
+# (it copies bytes; the host proxy is the only parser), but it is a large binary with libssl, libcrypto,
+# libwrap, libz and libzstd linked in, and it does read the bytes the agent sends into its own buffers, so
+# a bug in that path runs as nobody with no JIT. No -d flag: without one socat prints errors only, on both
 # 1.7 (RHEL 10) and 1.8 (Debian 13); -d0 is a 1.8 spelling of the same and 1.7 rejects it with its usage text.
 # max-children=16 matches the host proxy's connection limit (api-proxy.py, Server.max_connections): one
 # forked socat per open connection, and a 17th waits in the listen backlog (backlog=16) instead of forking
