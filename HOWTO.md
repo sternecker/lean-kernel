@@ -52,6 +52,7 @@ patching on top of it.
 make config            # clang build (default): also applies configs/llvm.fragment
 LLVM=0 make config     # gcc build: no CFI, RANDSTRUCT or KSTACK_ERASE
 VSOCK_ONLY=1 make config   # vsock-only profile: also applies configs/vsock-only.fragment
+VMWARE=1 VMCI=1 make config   # VMware guest with a vsock channel to the host proxy: also applies configs/vmci.fragment
 ```
 
 What happens: `base-firecracker-x86_64-6.18.config` + `configs/lean.fragment` are merged with the kernel's
@@ -380,7 +381,7 @@ spurious login/auth error). Also refused:
   `mcp-client`, `mcp-tunnels`, `files-api`, `skills`, `environments`, `ccr-byoc` and `advisor-tool` beta families (and, in the body, any
   typed tool, the `mcp_servers`/`container` field, or a URL/file source).
 - Betas that charge more per token than the budget counts: `context-1m`, `fast-mode` (and its `speed` field) and
-  `cache-keepalive`. A `[1m]` model fails in the VM. Tests: `python3 -I tests/api-proxy-test.py`. Claude Code's WebSearch tool is therefore unavailable in the VM. Log lines escape control
+  `cache-keepalive`. A `[1m]` model fails in the VM. Tests: `python3 -I tests/api-proxy-test.py`. For a VMware guest, build with `VMCI=1` and run `scripts/vmci-bridge.py --allow-cid <vmci0.id> --upstream <proxy socket>` on the host: it accepts the guest's AF_VSOCK connection (host CID 2, port 8080) and relays it to the proxy's Unix socket (tests: `python3 -I tests/vmci-bridge-test.py`). The host needs `vmw_vsock_vmci_transport` loaded; the bridge is untested against a real VMware guest. Claude Code's WebSearch tool is therefore unavailable in the VM. Log lines escape control
 characters, and what headless `make agent` prints from the guest and the log has them stripped, so the guest
 can't send escape sequences to your terminal. Interactive mode can't strip them all without breaking Claude Code's
 full-screen interface, so the serial console goes through `scripts/console-filter.py`, which parses it as a terminal

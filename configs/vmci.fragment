@@ -1,0 +1,15 @@
+# vmci.fragment: applied after vmware.fragment when VMWARE=1 VMCI=1.
+# The plain VMware profile has no channel to the host. This adds one: AF_VSOCK over VMware's VMCI
+# (vmw_vsock_vmci_transport). The host is CID 2 as under Firecracker, so the guest side is unchanged:
+# AF_VSOCK to CID 2 port 8080, or the AF_UNIX shim (socat UNIX-LISTEN:/run/egress.sock,fork VSOCK-CONNECT:2:8080).
+# On the host, scripts/vmci-bridge.py accepts that and hands it to api-proxy.py's Unix socket.
+# The guest still has no NIC and no TCP/IP: this is the only way out, and it reaches only the bridge.
+#
+# Cost: the VMCI driver (a PCI device the hypervisor presents) is guest-kernel code parsing host-supplied
+# data, with its own CVE history. That is why vmware.fragment leaves it out; take it only for a guest that
+# has to reach the proxy.
+
+CONFIG_NET=y
+CONFIG_VSOCKETS=y
+CONFIG_VMWARE_VMCI=y
+CONFIG_VMWARE_VMCI_VSOCKETS=y

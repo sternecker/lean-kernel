@@ -94,6 +94,11 @@ VMWARE="${VMWARE:-0}"
 PROFILE="lean"
 [[ "$VSOCK_ONLY" == "1" ]] && PROFILE="lean-vsock"
 [[ "$VMWARE" == "1" ]] && PROFILE="lean-vmware"
+# VMCI=1 adds vmci.fragment on top of the VMware profile: AF_VSOCK over VMware's VMCI, the guest's one channel to
+# the host proxy (scripts/vmci-bridge.py on the host). Opt-in: the plain VMware profile has no host channel at all.
+VMCI="${VMCI:-0}"
+[[ "$VMCI" == "1" && "$VMWARE" != "1" ]] && { echo "error: VMCI=1 needs VMWARE=1 (Firecracker's vsock is not VMCI; see configs/vmci.fragment)" >&2; exit 1; }
+[[ "$VMCI" == "1" ]] && PROFILE="lean-vmware-vmci"
 
 die() { echo "error: $*" >&2; exit 1; }
 note() { echo "== $*"; }

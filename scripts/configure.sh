@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# base config + lean.fragment (+ llvm.fragment unless LLVM=0, + vsock-only.fragment with VSOCK_ONLY=1, + vmware.fragment with VMWARE=1)
+# base config + lean.fragment (+ llvm.fragment unless LLVM=0, + vsock-only.fragment with VSOCK_ONLY=1, + vmware.fragment with VMWARE=1, + vmci.fragment with VMCI=1 on top of it)
 # -> out/.config, then verify every fragment line survived Kconfig dependency resolution.
 # When two fragments set the same option, the later one wins (as in merge_config.sh) and is what's checked.
 # merge_config.sh warns and moves on when a dependency overrides a line; this script does not.
@@ -14,6 +14,7 @@ frags=("$ROOT/configs/lean.fragment")
 [[ "$LLVM" == "1" ]] && frags+=("$ROOT/configs/llvm.fragment")
 [[ "$VSOCK_ONLY" == "1" ]] && frags+=("$ROOT/configs/vsock-only.fragment")
 [[ "$VMWARE" == "1" ]] && frags+=("$ROOT/configs/vmware.fragment")
+[[ "$VMCI" == "1" ]] && frags+=("$ROOT/configs/vmci.fragment")
 
 note "merging $(basename "$BASE_CONFIG") + ${frags[*]##*/}"
 ( cd "$SRC" && KCONFIG_CONFIG="$OUT/.config" scripts/kconfig/merge_config.sh -m -Q -O "$OUT" "$ROOT/$BASE_CONFIG" "${frags[@]}" >/dev/null )

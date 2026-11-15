@@ -26,6 +26,7 @@ configs/
   lean.fragment          the cuts and the gcc-safe hardening, applied on top of base
   llvm.fragment          CFI + RANDSTRUCT + KSTACK_ERASE, applied to the default clang build
   vsock-only.fragment    no TCP/IP, no NIC driver, no AF_PACKET; applied only with VSOCK_ONLY=1
+  vmci.fragment          AF_VSOCK over VMware VMCI; applied only with VMWARE=1 VMCI=1
   checker-accepted.txt   kernel-hardening-checker FAILs reviewed and accepted, each with its reason
 scripts/
   _env.sh                shared settings for every script (paths, toolchain, VERSION)

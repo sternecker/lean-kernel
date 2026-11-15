@@ -20,7 +20,7 @@ fi
 [[ -z "$(git -C "$khc" status --porcelain)" ]] || die "kernel-hardening-checker checkout has local changes; refusing to run it"
 
 build=gcc; [[ "$LLVM" == "1" ]] && build=clang
-profile=default; [[ "$VSOCK_ONLY" == "1" ]] && profile=vsock; [[ "$VMWARE" == "1" ]] && profile=vmware
+profile=default; [[ "$VSOCK_ONLY" == "1" ]] && profile=vsock; [[ "$VMWARE" == "1" ]] && profile=vmware; [[ "$VMCI" == "1" ]] && profile=vmware-vmci
 report="$(cd "$khc" && python3 -I ./bin/kernel-hardening-checker -c "$OUT/.config" -m show_fail)" \
   || die "kernel-hardening-checker failed to run"
 echo "$report"

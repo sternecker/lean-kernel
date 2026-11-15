@@ -75,8 +75,9 @@ CONFIG_EFI_STUB=y
 # CONFIG_PNP_DEBUG_MESSAGES is not set
 
 # Deliberately NOT here, so a later reader doesn't add them to "make it work":
-#  - VMWARE_VMCI / VMW_VSOCK_VMCI_TRANSPORT (VMware's vsock): a second host-guest channel, and a driver with
-#    its own CVE history.
+#  - VMWARE_VMCI / VMWARE_VMCI_VSOCKETS (VMware's vsock): a host-guest channel, and a driver with its own CVE
+#    history. Not in this profile; VMCI=1 adds them from vmci.fragment, for a guest that must reach the host
+#    API proxy (scripts/vmci-bridge.py). Don't add them here.
 #  - VMWARE_BALLOON, VMWARE_PVSCSI, vmwgfx/DRM, VMware shared folders: ballooning and display/disk
 #    conveniences with no use here.
 #  - Any storage or CD-ROM driver (see above).
