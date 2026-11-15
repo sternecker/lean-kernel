@@ -12,7 +12,7 @@ The Firecracker kernel has `CONFIG_PCI` and `CONFIG_ACPI` off and finds its devi
 |---|---|---|
 | Bus / firmware | virtio-mmio, no PCI, no ACPI | PCI + MSI + ACPI, EFI stub |
 | Root | ext4 on virtio-blk | initramfs in RAM, unpacked from the ISO by GRUB |
-| Storage drivers | virtio-blk, ext4 | **none**: no SCSI, ATA, NVMe, ISO9660 |
+| Storage drivers | virtio-blk, ext4 | **none**: no SCSI, ATA, NVMe, ISO9660, and virtio-blk, virtio-pmem and ext4 are cut too |
 | Console | serial | serial only |
 | Network | virtio-net + TCP/IP | **none**: no NIC driver, no TCP/IP, no `AF_PACKET` |
 | vsock | virtio-vsock | virtio-vsock (KVM only; VMware has none, and VMCI is left out) |

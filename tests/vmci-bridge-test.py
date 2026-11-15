@@ -137,8 +137,8 @@ check("quiet upstream accepted", bq.handle(theirs, 3))
 ours.settimeout(10)
 check("proxy close ends a silent guest's connection", ours.recv(10) == b"")
 for _ in range(50):
-    if bq.slots.acquire(blocking=False):
-        bq.slots.release()
+    if bq.slots[3].acquire(blocking=False):
+        bq.slots[3].release()
         freed = True
         break
     time.sleep(0.1)
@@ -146,6 +146,52 @@ else:
     freed = False
 check("slot freed after proxy close", freed)
 ours.close()
+
+# A guest that sends a request and never reads the reply: the write to it times out, the connection is
+# dropped and the slot comes back (it used to be held, with two threads, until the VM powered off).
+flood_path = os.path.join(tmp, "flood.sock")
+flood = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+flood.bind(flood_path)
+flood.listen(4)
+
+
+def flood_serve():
+    c, _ = flood.accept()
+    c.settimeout(3)
+    try:
+        while True:
+            c.sendall(b"y" * 65536)
+    except OSError:
+        pass
+    c.close()
+
+
+threading.Thread(target=flood_serve, daemon=True).start()
+bf = vb.Bridge([3, 4], flood_path, max_conns=1, idle=5, send_timeout=1)
+ours, theirs = socket.socketpair()
+check("stalled guest accepted", bf.handle(theirs, 3))
+o4, t4 = socket.socketpair()
+check("another CID has its own slots", bf.handle(t4, 4))
+o4.close()
+ours.sendall(b"request")
+freed = False
+for _ in range(80):
+    if bf.slots[3].acquire(blocking=False):
+        bf.slots[3].release()
+        freed = True
+        break
+    time.sleep(0.1)
+check("guest that stops reading loses its slot", freed)
+ours.close()
+
+# vmci0.id as the .vmx writes it (signed) matches the CID the kernel reports (unsigned).
+bn = vb.Bridge([-565041737], path)
+check("negative CID from the .vmx is allowed as its unsigned value", 3729925559 in bn.allow and vb.cid_u32(-565041737) == 3729925559)
+
+# Refusals are logged at a bounded rate.
+lim = vb.LogLimit(5)
+n = sum(1 for _ in range(1000) if lim.ok()[0])
+check("log limited per minute", n == 5 and lim.dropped == 995, (n, lim.dropped))
 
 # Upstream gone: the guest side is closed and the slot freed; nothing escapes to the accept loop.
 os.unlink(path)

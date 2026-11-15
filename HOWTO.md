@@ -381,7 +381,7 @@ spurious login/auth error). Also refused:
   `mcp-client`, `mcp-tunnels`, `files-api`, `skills`, `environments`, `ccr-byoc` and `advisor-tool` beta families (and, in the body, any
   typed tool, the `mcp_servers`/`container` field, or a URL/file source).
 - Betas that charge more per token than the budget counts: `context-1m`, `fast-mode` (and its `speed` field) and
-  `cache-keepalive`. A `[1m]` model fails in the VM. Tests: `python3 -I tests/api-proxy-test.py`. For a VMware guest, build with `VMCI=1` and run `scripts/vmci-bridge.py --allow-cid <vmci0.id> --upstream <proxy socket>` on the host: it accepts the guest's AF_VSOCK connection (host CID 2, port 8080) and relays it to the proxy's Unix socket (tests: `python3 -I tests/vmci-bridge-test.py`). The host needs `vmw_vsock_vmci_transport` loaded; the bridge is untested against a real VMware guest. Claude Code's WebSearch tool is therefore unavailable in the VM. Log lines escape control
+  `cache-keepalive`. A `[1m]` model fails in the VM. Tests: `python3 -I tests/api-proxy-test.py`. For a VMware guest, build with `VMCI=1` and run `scripts/vmci-bridge.py --allow-cid <vmci0.id> --upstream <proxy socket>` on the host: it accepts the guest's AF_VSOCK connection (host CID 2, port 8080) and relays it to the proxy's Unix socket (tests: `python3 -I tests/vmci-bridge-test.py`). The host needs `vmw_vsock_vmci_transport` loaded; the bridge is untested against a real VMware guest. The CID is the only identity VMCI gives, and it names a VM only while that VM runs: start the bridge and the proxy for one VM and stop them when it powers off (the script's header has the details). Claude Code's WebSearch tool is therefore unavailable in the VM. Log lines escape control
 characters, and what headless `make agent` prints from the guest and the log has them stripped, so the guest
 can't send escape sequences to your terminal. Interactive mode can't strip them all without breaking Claude Code's
 full-screen interface, so the serial console goes through `scripts/console-filter.py`, which parses it as a terminal
@@ -569,7 +569,8 @@ the first jailed run and removed by uninstall, lets uid `lean-proxy` open TCP 44
 everything else it sends. Firecracker also gets a file size limit (`fsize`): the scratch drive plus 64 MiB.
 It runs in its own PID namespace (`--new-pid-ns`), as that namespace's init, so it sees no host process. The jailer
 exits as soon as it has started Firecracker, so the wrapper waits on the VM's cgroup (or, with `CGROUPS=0`, on the run's
-uid) and exits 0 when the VM is gone; Firecracker's own exit status is not passed on.
+uid) and exits 0 when the VM is gone, or 137 if the cgroup shows the OOM killer ended it; Firecracker's own exit
+status is otherwise not passed on (a VMM killed by its seccomp filter shows only in the kernel audit log).
 
 Not yet:
 - No project workspace: the agent gets an empty home (or a kept one), not a copy of your repo.

@@ -32,6 +32,14 @@ CONFIG_TMPFS=y
 # virtio on the PCI transport, for QEMU/KVM q35 (the base config already has the virtio-blk, -console,
 # -rng and vsock drivers on the mmio transport). VMware has none of these devices.
 CONFIG_VIRTIO_PCI=y
+# ...which would also bring the base config's virtio-blk to life on QEMU/KVM (a virtio disk on the PCI bus,
+# libvirt's default), and with ext4 the guest could mount it. "No storage driver" has to be cut, not assumed:
+# no block driver, and no on-disk filesystem to mount one with (the root is the initramfs, on tmpfs/ramfs).
+# The same goes for virtio-pmem and the NVDIMM subsystem behind it (a persistent-memory disk, /dev/pmem0).
+# CONFIG_VIRTIO_BLK is not set
+# CONFIG_VIRTIO_PMEM is not set
+# CONFIG_LIBNVDIMM is not set
+# CONFIG_EXT4_FS is not set
 
 # No network. A NIC driver is code that parses whatever a virtual device hands it, and the TCP/IP stack
 # is code that parses whatever arrives; this profile has neither, so there is nothing to attack and

@@ -112,6 +112,7 @@ built_profile() {
   for f in "$OUT"/lean*-"$KERNEL_VERSION".config; do
     [[ -f "$f" ]] && cmp -s "$f" "$OUT/.config" && { f="${f##*/}"; echo "${f%-"$KERNEL_VERSION".config}"; return 0; }
   done
+  return 0   # no match is an answer (empty), not a failure: callers run under set -e
 }
 # For the scripts that boot $OUT/bzImage in Firecracker: a VMware build boots from an ISO (scripts/mkiso.sh).
 # Without this its missing TCP/IP reads as VSOCK_ONLY=1 further on, and the messages point the wrong way.

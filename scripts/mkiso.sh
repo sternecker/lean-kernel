@@ -61,7 +61,10 @@ menuentry "lean-kernel $KERNEL_VERSION" {
 EOF
 
 iso="$OUT/lean.iso"
-"$mkrescue" "${grub_args[@]}" -o "$iso" "$stage" -- -volid LEAN_KERNEL >/dev/null 2>"$stage/mkrescue.log" \
-  || { cat "$stage/mkrescue.log" >&2; die "$(basename "$mkrescue") failed"; }
+# The log goes next to the stage, not in it: everything in $stage is packed into the ISO, and this log names
+# the build host's paths.
+mklog="$stage.mkrescue.log"
+"$mkrescue" "${grub_args[@]}" -o "$iso" "$stage" -- -volid LEAN_KERNEL >/dev/null 2>"$mklog" \
+  || { cat "$mklog" >&2; die "$(basename "$mkrescue") failed"; }
 ls -l "$iso" | awk -v m="$mode" '{printf "iso: %s (%.1f MB, %s)\n", $9, $5/1048576, m}'
 echo "kernel args: $args"

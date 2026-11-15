@@ -19,7 +19,8 @@ and for messages the tokens used and the running totals. Guest-chosen text in a 
 source type, a model) is cut to 64 characters, and every log line to MAX_LOG_LINE, so the guest can't
 grow the host log by bytes the way the line cap and rate limit stop it growing by lines.
 
-Budget, per proxy process (one VM session); 0 means unlimited. Over budget: 403 proxy_budget_exhausted.
+Budget, per proxy process (one VM session); 0 means unlimited. Over budget: 403 proxy_budget_exhausted
+(429 while only the reservations of requests still in flight reach the limit).
 Over the rate: 429 with Retry-After, which Claude Code backs off on. Totals are counted from the usage
 the API reports. Requests in flight reserve an estimate (body size, max_tokens) against the token budgets until
 they finish, so concurrent requests count against each other and a budget is overshot by at most the one request
@@ -227,6 +228,10 @@ def body_policy(body):
     for k in req:
         if k not in ALLOW_FIELDS:
             return f"field {_short(k)} not allowed", req
+    # The budget reserves and charges by max_tokens: 32000.0 or "32000" would be forwarded but counted as 0.
+    mt = req.get("max_tokens")
+    if "max_tokens" in req and (not isinstance(mt, int) or isinstance(mt, bool) or mt <= 0):
+        return "max_tokens is not a positive integer", req
     tools = req.get("tools") or []
     if not isinstance(tools, list):
         return "tools is not a list", req
@@ -304,10 +309,16 @@ class Budget:
                 why = (403, "proxy_denied", f"model {_short(model)} not allowed")
             elif self.max_requests and self.requests >= self.max_requests:
                 why = (403, "proxy_budget_exhausted", f"request budget used up ({self.max_requests})")
-            elif self.max_input and self.inp + self.res_in >= self.max_input:
+            elif self.max_input and self.inp >= self.max_input:
                 why = (403, "proxy_budget_exhausted", f"input token budget used up ({self.max_input})")
-            elif self.max_output and self.out + self.res_out >= self.max_output:
+            elif self.max_output and self.out >= self.max_output:
                 why = (403, "proxy_budget_exhausted", f"output token budget used up ({self.max_output})")
+            # Only the reservations of requests still in flight reach the limit: that passes when they
+            # finish (most use far less than they reserve), so it is a retry, not the end of the session.
+            elif self.max_input and self.inp + self.res_in >= self.max_input:
+                why = (429, "rate_limit_error", "input token budget reserved by requests in flight")
+            elif self.max_output and self.out + self.res_out >= self.max_output:
+                why = (429, "rate_limit_error", "output token budget reserved by requests in flight")
             else:
                 now = time.monotonic()
                 while self.recent and now - self.recent[0] > 60:
@@ -442,6 +453,11 @@ class UpstreamConnection(http.client.HTTPSConnection):
         raise err
 BUDGET = Budget(0, 0, 0, 0, "")
 BODY_COST = 4                  # memory held per body byte: the bytes, the parsed tree, the re-encoding, slack
+# Per JSON value on top of that: a body of "[],[],[]..." parses to a 56-byte list plus a pointer for every
+# 3 bytes (measured: 3 MiB of it grew the proxy by 107 MiB), which BODY_COST alone misses by an order of
+# magnitude. Values are counted as the bytes that separate them (, [ { :), which over-counts those inside
+# strings: the safe direction.
+NODE_COST = 96
 INFLIGHT = ByteBudget(0)       # main() sets it from --max-inflight-bytes (default 128 MiB / BODY_COST bodies)
 TLS = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 TLS.check_hostname = True
@@ -564,6 +580,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _serve(self, path_only, upstream_path, n, t0):
         body = self.rfile.read(n)
+        extra = NODE_COST * sum(body.count(c) for c in (b",", b"[", b"{", b":"))
+        if INFLIGHT.cap and extra > INFLIGHT.cap:
+            log(f"DENY  {self.command} {path_only} (body has too many JSON values)")
+            return self.deny(413, "request body has too many JSON values")
+        if not INFLIGHT.acquire(extra):
+            log(f"LIMIT {self.command} {path_only} (body bytes in flight)")
+            return self.deny(429, "too many request bytes in flight", "rate_limit_error")
+        try:
+            return self._forward(path_only, upstream_path, body, t0)
+        finally:
+            INFLIGHT.release(extra)
+
+    def _forward(self, path_only, upstream_path, body, t0):
         why, headers = upstream_headers(self.headers.items())
         if why:
             log(f"DENY  {self.command} {path_only} ({why})")
@@ -593,6 +622,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             up.request(self.command, upstream_path, body=body, headers=headers)
             resp = up.getresponse()
             status = resp.status
+            # Before anything is written to the guest: a guest that hung up while the API was working makes
+            # the first write fail, and the reply it didn't wait for is billed all the same.
+            if path_only == "/v1/messages" and resp.status == 200:
+                usage = Usage(resp.getheader("Content-Type"))
             self.send_response(resp.status, resp.reason)
             for k, v in resp.getheaders():
                 if k.lower() not in HOP:
@@ -605,8 +638,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_header("Content-Length", clen)
             self.send_header("Connection", "close")
             self.end_headers()
-            if path_only == "/v1/messages" and resp.status == 200:
-                usage = Usage(resp.getheader("Content-Type"))
             while True:
                 data = resp.read1(65536)
                 if not data:
@@ -642,6 +673,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     o = usage.streamed_estimate()
                 elif not usage.complete:   # cut off before the final count: assume it would have used what it asked for
                     o = max(o, est[1])
+                    if not i:              # and before the API reported its input (message_start, or the JSON body)
+                        i = est[0]
             ti, to = BUDGET.charge(i, o, est)   # also releases the reservation
             if usage:
                 tokens = f" in {i} out {o} (session {ti}/{to})"
@@ -924,10 +957,18 @@ def main():
         f"{a.max_log_lines} log lines", always=True)
     # Token read, log open, socket bound: from here on the proxy only serves. Unix sockets for the guest,
     # TCP to the API; no other socket family.
+    def unbind():   # a socket file left behind reads as "the proxy started" to whoever waits for it
+        srv.server_close()
+        try:
+            os.unlink(a.listen)
+        except OSError:
+            pass
+
     if a.landlock != "off":
         try:
             abi = install_landlock(remove_in=(os.path.dirname(os.path.abspath(a.listen)),), required=a.landlock == "require")
         except OSError as e:
+            unbind()
             sys.exit(f"api-proxy: {e}; not running without Landlock (--landlock require)")
         log(f"landlock: ABI {abi} (reads: interpreter, libraries, /etc; no writes; "
             f"{'abstract sockets and signals scoped' if abi >= 6 else 'no scoping before ABI 6'})" if abi
@@ -937,8 +978,12 @@ def main():
     # resolver may want one (nscd, systemd-resolved), so it stays.
     try:
         fams = (socket.AF_INET, socket.AF_INET6) if ADDRS else (socket.AF_UNIX, socket.AF_INET, socket.AF_INET6)
-        install_seccomp(socket_families=fams)
+        # socketpair too (53): it makes AF_UNIX sockets without socket(), and a datagram pair can sendto() a
+        # host pathname socket (/dev/log, journald), which Landlock's abstract-socket scoping doesn't cover.
+        # Nothing here uses it.
+        install_seccomp(extra_deny=(53,), socket_families=fams)
     except OSError as e:
+        unbind()
         sys.exit(f"api-proxy: {e}; not running without the seccomp filter")
     log("seccomp: filter loaded", always=True)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))  # run-agent.sh stops the proxy with TERM

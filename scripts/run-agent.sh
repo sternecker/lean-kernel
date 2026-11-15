@@ -49,6 +49,7 @@ esac
 [[ $jailed == 0 ]] || { grep -q -e '--new-pid-ns' "$WRAPPER" && grep -q -e '--landlock require' "$WRAPPER"; } \
   || die "the installed $WRAPPER predates the PID namespace and the proxy's Landlock; rerun: sudo scripts/jail-setup.sh"
 [[ $jailed == 1 || -x "$FC" ]] || die "firecracker missing; run make deps"
+require_firecracker_build
 # Every Firecracker here runs under the tightened release filter (scripts/seccomp-filter.sh); the jail
 # uses the root-owned copy jail-setup built, the unjailed path the one in out/.
 [[ $jailed == 1 ]] || "$ROOT/scripts/seccomp-filter.sh" >/dev/null
