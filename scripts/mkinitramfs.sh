@@ -7,6 +7,10 @@
 # Each run stages into a fresh work/initramfs-stage.XXXXXX and deletes nothing; make clean removes work/.
 source "$(dirname "$0")/_env.sh"
 
+# The archive itself doesn't depend on the kernel, but it lands in $OUT next to one, where mkiso.sh packs both:
+# keep it out of the Firecracker profile's out/.
+[[ "$VMWARE" == "1" ]] || die "the initramfs is for the VMware profile: run with VMWARE=1 (and LEAN_OUT=<dir>, e.g. out-vmware)"
+
 bb="$(command -v busybox)" || die "busybox not installed ($PKG_INSTALL $(pkg busybox-static busybox))"
 command -v cpio >/dev/null || die "cpio not installed ($PKG_INSTALL cpio)"
 command -v fakeroot >/dev/null || die "fakeroot not installed ($PKG_INSTALL fakeroot)"

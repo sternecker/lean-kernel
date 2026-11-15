@@ -44,7 +44,7 @@ scripts/mkiso.sh                                   # -> out-vmware/lean.iso (27 
 
 Both scripts stage in a fresh `work/*-stage.XXXXXX` directory and delete nothing, so old stage directories accumulate in `work/` until `make clean`.
 
-The kernel command line in `grub.cfg` is taken from `vm/vm.json.in` at build time, minus the Firecracker-only parts (`root=`, `init=`, `pci=off`, `reboot=k`), plus `console=ttyS0,115200 rdinit=/init reboot=acpi`. It keeps `lockdown=confidentiality` and the sysctls.
+The kernel command line in `grub.cfg` is taken from `vm/vm.json.in` at build time, minus the Firecracker-only parts (`root=`, `init=`, `pci=off`, `reboot=k`; `panic=1` stays), plus `console=ttyS0,115200 rdinit=/init reboot=acpi`. It keeps `lockdown=confidentiality` and the sysctls.
 
 ## Running it in QEMU
 

@@ -97,6 +97,56 @@ ok5, s5 = retry(3)
 check("slot freed after close", ok5)
 s5.close()
 
+# A reply that takes longer than the guest's silence: the guest sends its request and then says nothing,
+# the proxy answers late. The bridge must not time the guest out (it did, at 30 s, against a 600 s proxy).
+check("upstream idle above the proxy's 600 s", vb.UPSTREAM_IDLE > 600, vb.UPSTREAM_IDLE)
+slow_path = os.path.join(tmp, "slow.sock")
+slow = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+slow.bind(slow_path)
+slow.listen(4)
+
+
+def slow_serve():
+    c, _ = slow.accept()
+    c.recv(100)
+    time.sleep(1.5)
+    c.sendall(b"late reply")
+    c.close()
+
+
+threading.Thread(target=slow_serve, daemon=True).start()
+bs = vb.Bridge([3], slow_path, max_conns=2, idle=5)
+ours, theirs = socket.socketpair()
+check("slow upstream accepted", bs.handle(theirs, 3))
+ours.sendall(b"request")
+ours.settimeout(10)
+check("late reply reaches a silent guest", ours.recv(100) == b"late reply")
+check("proxy close reaches the guest", ours.recv(10) == b"")
+ours.close()
+
+# The proxy closes while the guest stays open and silent (the proxy's own idle timeout): the guest sees
+# EOF and the slot comes back, instead of the bridge holding the connection forever.
+quiet_path = os.path.join(tmp, "quiet.sock")
+quiet = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+quiet.bind(quiet_path)
+quiet.listen(4)
+threading.Thread(target=lambda: quiet.accept()[0].close(), daemon=True).start()
+bq = vb.Bridge([3], quiet_path, max_conns=1, idle=5)
+ours, theirs = socket.socketpair()
+check("quiet upstream accepted", bq.handle(theirs, 3))
+ours.settimeout(10)
+check("proxy close ends a silent guest's connection", ours.recv(10) == b"")
+for _ in range(50):
+    if bq.slots.acquire(blocking=False):
+        bq.slots.release()
+        freed = True
+        break
+    time.sleep(0.1)
+else:
+    freed = False
+check("slot freed after proxy close", freed)
+ours.close()
+
 # Upstream gone: the guest side is closed and the slot freed; nothing escapes to the accept loop.
 os.unlink(path)
 ok6, s6 = retry(3)
