@@ -74,6 +74,7 @@ Rules:
    PYTHONDONTWRITEBYTECODE=1 python3 -I tests/console-filter-test.py
    PYTHONDONTWRITEBYTECODE=1 python3 -I tests/seccomp-test.py
    PYTHONDONTWRITEBYTECODE=1 python3 -I tests/tool-shell-test.py
+   PYTHONDONTWRITEBYTECODE=1 python3 -I tests/jail-policy-test.py
    shellcheck scripts/*.sh scripts/lean-agent-jail guest/*.sh   # installed on this host
    ```
    Kernel-side changes also need `make fetch config build check` (CI runs that chain). **CI does not

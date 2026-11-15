@@ -14,9 +14,10 @@
 #   - Claude Code itself is a single pinned binary under Anthropic's own terms.
 source "$(dirname "$0")/_env.sh"
 
-command -v syft >/dev/null 2>&1 || die "syft not installed. Install it (https://github.com/anchore/syft):
-  curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b ~/.local/bin
-or via your package manager (brew install syft), then rerun make sbom"
+command -v syft >/dev/null 2>&1 || die "syft not installed. Install it from your package manager (brew install syft), or download a
+release from https://github.com/anchore/syft/releases and verify it against the checksums file published with
+that release (and its signature, see https://github.com/anchore/syft#verifying-the-artifacts), then rerun make sbom.
+Do not pipe the project's install script from the main branch into a shell."
 
 stage="$WORK/rootfs-agent-stage"
 img="$OUT/rootfs-agent.ext4"

@@ -567,10 +567,11 @@ waits in the listen backlog, and the bridge's uid is capped at 32 processes as a
 to them directly. It still verifies TLS for the name, so it needs no DNS. The nftables table `inet lean_agent`, created on
 the first jailed run and removed by uninstall, lets uid `lean-proxy` open TCP 443 to those addresses and rejects
 everything else it sends. Firecracker also gets a file size limit (`fsize`): the scratch drive plus 64 MiB.
+It runs in its own PID namespace (`--new-pid-ns`), as that namespace's init, so it sees no host process. The jailer
+exits as soon as it has started Firecracker, so the wrapper waits on the VM's cgroup (or, with `CGROUPS=0`, on the run's
+uid) and exits 0 when the VM is gone; Firecracker's own exit status is not passed on.
 
 Not yet:
-- Firecracker isn't in its own PID namespace: `--new-pid-ns` makes the jailer exit early, so the wrapper
-  couldn't wait for the VM.
 - No project workspace: the agent gets an empty home (or a kept one), not a copy of your repo.
 
 ## Troubleshooting

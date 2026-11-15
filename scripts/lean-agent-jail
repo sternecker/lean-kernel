@@ -258,8 +258,24 @@ done
 
 [[ -n "$RUNDIR" ]] || die "run=ID is required (scripts/run-agent.sh passes it)"
 as_owner test -d "$RUNDIR" -a ! -L "$RUNDIR" || die "$RUNDIR is not a directory $OWNER owns"
-tok_mode="$(as_owner stat -c %a "$TOKEN_FILE")" || die "can't read $TOKEN_FILE as $OWNER"
-(( ( 8#$tok_mode & 8#077 ) == 0 )) || die "$TOKEN_FILE is readable by group/others; chmod 600 it"
+# The token's real path, checked the way ssh checks its keys: the file is OWNER's and private, and no
+# directory on the way to it from / can be changed by anyone but OWNER or root. A writable directory
+# anywhere up the path (not only the parent) would let another user rename what lies below it and put a
+# token of their own in its place; the sticky bit (as on /tmp) stops that, since then only an entry's
+# owner may rename it. The proxy reads this resolved path, so a symlink can't be swapped in after the check.
+owner_uid="$(id -u "$OWNER")"
+tok_real="$(as_owner realpath -e -- "$TOKEN_FILE")" || die "can't resolve $TOKEN_FILE as $OWNER"
+read -r tok_mode tok_uid < <(as_owner stat -c '%a %u' -- "$tok_real") || die "can't read $tok_real as $OWNER"
+[[ "$tok_uid" == "$owner_uid" ]] || die "$tok_real is owned by uid $tok_uid, not $OWNER"
+(( ( 8#$tok_mode & 8#077 ) == 0 )) || die "$tok_real is readable by group/others; chmod 600 it"
+d="$tok_real"
+while [[ "$d" != / ]]; do
+  d="$(dirname "$d")"
+  read -r d_mode d_uid < <(as_owner stat -c '%a %u' -- "$d") || die "can't stat $d as $OWNER"
+  [[ "$d_uid" == 0 || "$d_uid" == "$owner_uid" ]] || die "$d (on the path to the token) is owned by uid $d_uid, not $OWNER or root"
+  (( ( 8#$d_mode & 8#022 ) == 0 || ( 8#$d_mode & 8#1000 ) != 0 )) \
+    || die "$d (on the path to the token) is group/world-writable without the sticky bit; chmod go-w it"
+done
 
 id="agent-$(date +%Y%m%d-%H%M%S)-$$"
 run="$BASE/firecracker/$id"; jail="$run/root"; pdir="$run/proxy"; ns="lean-$id"
@@ -333,9 +349,9 @@ chown lean-proxy:lean-proxy "$pdir"
 egress_setup
 # The proxy: its own user, no groups, no capabilities. Token on fd 0, log appended to the run directory
 # as OWNER.
-as_owner cat -- "$TOKEN_FILE" | setpriv --reuid=lean-proxy --regid=lean-proxy --clear-groups \
+as_owner cat -- "$tok_real" | setpriv --reuid=lean-proxy --regid=lean-proxy --clear-groups \
     --inh-caps=-all --bounding-set=-all --no-new-privs -- \
-    python3 -I "$pdir/api-proxy.py" --listen "$pdir/p.sock" --token-fd 0 "${upstream_args[@]}" "${proxy_args[@]}" \
+    python3 -I "$pdir/api-proxy.py" --listen "$pdir/p.sock" --token-fd 0 --landlock require "${upstream_args[@]}" "${proxy_args[@]}" \
     2> >(as_owner sh -c 'cat >> "$1"' sh "$RUNDIR/agent-proxy.log") &
 proxy=$!
 # The proxy in its own cgroup next to Firecracker's: memory, task and CPU limits on the host side of the
@@ -376,8 +392,11 @@ if [[ "${CGROUPS:-1}" == 1 ]]; then
   cg=(--cgroup-version 2 --parent-cgroup "$CG_PARENT"
       --cgroup "memory.max=$MEM_MAX" --cgroup "pids.max=$PIDS_MAX" --cgroup "cpu.max=$CPU_MAX")
 fi
-# In the background so a signal runs the trap at once instead of waiting for the VM to exit; the jailer
-# execs into Firecracker, so $fc is Firecracker's pid. Firecracker gets no terminal fd: keystrokes arrive
+# With --new-pid-ns the jailer does not exec into Firecracker: it clone()s it into a new PID namespace, writes
+# the child's pid to firecracker.pid in the chroot and exits at once (jailer env.rs, exec_into_new_pid_ns).
+# So the jailer's exit is the VM's start, not its end; the loop below waits for the VM itself. Firecracker
+# is not this shell's child, so its exit status is not available: the wrapper exits 0 once the VM is gone
+# (run-agent.sh judges the run by the guest's AGENT-EXIT line, not by this status). Firecracker gets no terminal fd: keystrokes arrive
 # through a pipe from a relay reading this wrapper's stdin as OWNER (the owner's terminal, raw, or
 # /dev/null when headless), and its stderr is a file in the run directory, written as OWNER. The shell
 # closes its copy of the pipe once Firecracker holds it, so the relay's exit is EOF for the serial console.
@@ -385,7 +404,7 @@ started=1
 exec {fc_in}< <(as_owner cat)
 relay=$!
 "$LIB/jailer" --id "$id" --exec-file "$LIB/firecracker" --uid "$fc_uid" --gid "$fc_gid" \
-  --chroot-base-dir "$BASE" --netns "/run/netns/$ns" "${cg[@]}" --resource-limit no-file=1024 \
+  --chroot-base-dir "$BASE" --new-pid-ns --netns "/run/netns/$ns" "${cg[@]}" --resource-limit no-file=1024 \
   --resource-limit "fsize=$FSIZE_MAX" \
   -- --no-api --config-file vm.json --seccomp-filter seccomp-filter.bpf --level Error <&"$fc_in" \
   2> >(as_owner sh -c 'cat >> "$1"' sh "$RUNDIR/firecracker.log") &
@@ -393,4 +412,20 @@ fc=$!
 exec {fc_in}<&-
 rc=0; wait "$fc" || rc=$?
 fc=""
-exit "$rc"
+[[ $rc == 0 ]] || exit "$rc"   # the jailer itself failed (bad arguments, chroot or cgroup setup)
+# Is the VM still running? With cgroups, the per-VM cgroup: the clone()d child is in it from the start,
+# whatever uid it has yet. Without, this run's Firecracker uid (claimed for this run alone), but the child
+# runs as root until it drops privileges, so first wait for that uid to appear. Not firecracker.pid: it sits
+# in the chroot, which Firecracker's uid owns and could rewrite. Polling keeps a signal's trap prompt
+# (at most one sleep late).
+fcg="/sys/fs/cgroup/$CG_PARENT/$id"
+if [[ "${CGROUPS:-1}" == 1 ]]; then
+  [[ -f "$fcg/cgroup.events" ]] || die "no $fcg after the jailer ran"
+  vm_running() { grep -qx 'populated 1' "$fcg/cgroup.events"; }
+else
+  for _ in $(seq 50); do pgrep -u "$fc_uid" >/dev/null 2>&1 && break; sleep 0.1; done
+  vm_running() { pgrep -u "$fc_uid" >/dev/null 2>&1; }
+fi
+vm_running || die "Firecracker exited at once; see $RUNDIR/firecracker.log"
+while vm_running; do sleep 0.2; done
+exit 0
