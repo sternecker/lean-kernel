@@ -24,7 +24,13 @@ grow the host log by bytes the way the line cap and rate limit stop it growing b
 
 Budget, per proxy process (one VM session); 0 means unlimited. Over budget: 403 proxy_budget_exhausted.
 Over the rate: 429 with Retry-After, which Claude Code backs off on. Totals are counted from the usage
-the API reports, so the request in flight when a budget runs out can overshoot it once.
+the API reports. Requests in flight reserve an estimate (body size, max_tokens) against the token budgets until
+they finish, so concurrent requests count against each other and a budget is overshot by at most the one request
+that crossed it; a stream cut off before its final count is charged the max_tokens it asked for, unless the API
+ended it with an error event (overloaded_error and the like), which is charged what it had streamed. Request bodies
+in memory are capped too (--max-inflight-bytes). After startup the proxy confines itself with Landlock (reads:
+interpreter, libraries, /etc; no writes; no abstract unix sockets) and, with pinned upstream addresses, may
+create no AF_UNIX socket.
   --max-requests N       requests forwarded (default 500)
   --max-input-tokens N   input tokens, cache reads and writes included (default 50,000,000)
   --max-output-tokens N  output tokens (default 1,000,000)
@@ -265,6 +271,11 @@ def body_policy(body):
     why = _walk(req)
     if why:
         return why, req
+    # json.loads accepts 1e999 (inf), which canonical() cannot encode: refuse it here, as a 403.
+    try:
+        canonical(req)
+    except (ValueError, RecursionError):
+        return "body is not JSON", None
     return None, req
 
 
@@ -305,6 +316,9 @@ class Budget:
         self.models = [m for m in models.split(",") if m] if models else []
         self.lock = threading.Lock()
         self.requests = self.inp = self.out = self.denied = 0
+        # Reserved by requests in flight: charge() only learns the real usage when a response ends, so
+        # without this N concurrent requests could each pass the check against the same running total.
+        self.res_in = self.res_out = 0
         self.recent = deque()
 
     def model_ok(self, model):
@@ -312,16 +326,18 @@ class Budget:
             return True
         return any(model == m or (m.endswith("*") and model.startswith(m[:-1])) for m in self.models)
 
-    def admit(self, model):
-        """Return None to forward, else (status, error type, message)."""
+    def admit(self, model, est_in=0, est_out=0):
+        """Return None to forward, else (status, error type, message). est_in and est_out are reserved
+        against the token budgets until charge() releases them: an upper-ish guess of what this request
+        may use (body size, max_tokens), so concurrent requests count against each other."""
         with self.lock:
             if not isinstance(model, str) or not self.model_ok(model):
                 why = (403, "proxy_denied", f"model {_short(model)} not allowed")
             elif self.max_requests and self.requests >= self.max_requests:
                 why = (403, "proxy_budget_exhausted", f"request budget used up ({self.max_requests})")
-            elif self.max_input and self.inp >= self.max_input:
+            elif self.max_input and self.inp + self.res_in >= self.max_input:
                 why = (403, "proxy_budget_exhausted", f"input token budget used up ({self.max_input})")
-            elif self.max_output and self.out >= self.max_output:
+            elif self.max_output and self.out + self.res_out >= self.max_output:
                 why = (403, "proxy_budget_exhausted", f"output token budget used up ({self.max_output})")
             else:
                 now = time.monotonic()
@@ -331,13 +347,18 @@ class Budget:
                     why = (429, "rate_limit_error", f"proxy rate limit {self.rpm}/min")
                 else:
                     self.requests += 1
+                    self.res_in += est_in
+                    self.res_out += est_out
                     self.recent.append(now)
                     return None
             self.denied += 1
             return why
 
-    def charge(self, inp, out):
+    def charge(self, inp, out, est=(0, 0)):
+        """Add the usage, and release the reservation admit() made (est, the same pair)."""
         with self.lock:
+            self.res_in = max(0, self.res_in - est[0])
+            self.res_out = max(0, self.res_out - est[1])
             self.inp += inp
             self.out += out
             return self.inp, self.out
@@ -348,6 +369,26 @@ class Budget:
                     f"{self.inp} input tokens, {self.out} output tokens")
 
 
+class ByteBudget:
+    """Bytes of request bodies the proxy holds at once. A body is read whole, parsed and re-encoded, so it
+    costs several times its size in memory; 16 connections of the largest body would otherwise outgrow the
+    proxy's cgroup (256 MiB) and get it OOM-killed, taking the log tail with it."""
+
+    def __init__(self, cap):
+        self.cap, self.used, self.lock = cap, 0, threading.Lock()
+
+    def acquire(self, n):
+        with self.lock:
+            if self.cap and self.used + n > self.cap:
+                return False
+            self.used += n
+            return True
+
+    def release(self, n):
+        with self.lock:
+            self.used = max(0, self.used - n)
+
+
 class Usage:
     """Token usage from a /v1/messages response: SSE stream (message_start, message_delta) or JSON."""
 
@@ -355,6 +396,9 @@ class Usage:
         self.sse = "text/event-stream" in (content_type or "")
         self.buf = b""
         self.inp = self.out = 0
+        self.complete = False   # the final usage (message_delta, or the JSON body) was seen
+        self.errored = False    # the API ended the stream with an error event (before any final usage)
+        self.delta_bytes = 0    # bytes of content_block_delta events seen: an upper bound on output so far
 
     def _take(self, u):
         if not isinstance(u, dict):
@@ -380,11 +424,23 @@ class Usage:
                 self._take((ev.get("message") or {}).get("usage"))
             elif ev.get("type") == "message_delta":
                 self._take(ev.get("usage"))
+                self.complete = True
+            elif ev.get("type") == "content_block_delta":
+                self.delta_bytes += len(line)
+            elif ev.get("type") == "error":
+                self.errored = True
+
+    def streamed_estimate(self):
+        """Output tokens a stream that ended early demonstrably produced: its delta events' size in bytes over
+        3 (a token is rarely under 3 bytes, and the JSON around each delta only makes this larger), so an
+        upper-ish bound, never below the count the API itself reported."""
+        return max(self.out, -(-self.delta_bytes // 3))
 
     def finish(self):
         if not self.sse:
             try:
                 self._take(json.loads(self.buf).get("usage"))
+                self.complete = True
             except (ValueError, AttributeError):
                 pass
         return self.inp, self.out
@@ -416,6 +472,8 @@ class UpstreamConnection(http.client.HTTPSConnection):
                 err = e
         raise err
 BUDGET = Budget(0, 0, 0, 0, "")
+BODY_COST = 4                  # memory held per body byte: the bytes, the parsed tree, the re-encoding, slack
+INFLIGHT = ByteBudget(0)       # main() sets it from --max-inflight-bytes (default 128 MiB / BODY_COST bodies)
 TLS = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 TLS.check_hostname = True
 TLS.verify_mode = ssl.CERT_REQUIRED
@@ -560,6 +618,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if n > MAX_BODY:
             log(f"DENY  {self.command} {path_only} (body {n} bytes)")
             return self.deny(413, "request body too large")
+        cost = BODY_COST * n
+        if not INFLIGHT.acquire(cost):
+            log(f"LIMIT {self.command} {path_only} (body bytes in flight)")
+            return self.deny(429, "too many request bytes in flight", "rate_limit_error")
+        try:
+            return self._serve(path_only, upstream_path, n, t0)
+        finally:
+            INFLIGHT.release(cost)
+
+    def _serve(self, path_only, upstream_path, n, t0):
         body = self.rfile.read(n)
         # Before any refusal below, so a request refused for another reason still trips it.
         canary = CANARY_HITS.check(self.command, path_only, body)
@@ -574,7 +642,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         body = canonical(req)  # forward what was checked, not what was sent
         if not canary:  # JSON escapes are decoded now: "\u0070laceholder-..." is plain text here
             CANARY_HITS.check(self.command, path_only, body)
-        refused = BUDGET.admit(req.get("model"))
+        # What this request may use: the body's size in tokens at worst (a token is rarely under 3 bytes),
+        # and the output it asked for.
+        mt = req.get("max_tokens")
+        est = (len(body) // 3, mt if isinstance(mt, int) and not isinstance(mt, bool) and mt > 0 else 0)
+        refused = BUDGET.admit(req.get("model"), *est)
         if refused:
             code, etype, msg = refused
             log(f"{'LIMIT' if code == 429 else 'DENY '} {self.command} {path_only} ({msg})")
@@ -628,9 +700,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             up.close()
             self.close_connection = True
             tokens = ""
+            i = o = 0
             if usage:  # charge even if the guest hung up mid-stream: the tokens were spent
                 i, o = usage.finish()
-                ti, to = BUDGET.charge(i, o)
+                if not usage.complete and usage.errored:
+                    # Ended by the API with an error event (overloaded_error during an outage, say): charging
+                    # max_tokens here would let a run of failed retries (Claude Code sends 32k each) empty the
+                    # output budget while producing nothing. Charge what it streamed. The event comes from the
+                    # API over TLS; the guest can't forge one.
+                    o = usage.streamed_estimate()
+                elif not usage.complete:   # cut off before the final count: assume it would have used what it asked for
+                    o = max(o, est[1])
+            ti, to = BUDGET.charge(i, o, est)   # also releases the reservation
+            if usage:
                 tokens = f" in {i} out {o} (session {ti}/{to})"
         log(f"ALLOW {self.command} {path_only} -> {status} {sent}B {time.monotonic() - t0:.1f}s{tokens}")
 
@@ -766,6 +848,90 @@ def install_seccomp(extra_deny=(), socket_families=None, threads=True):
 # --- seccomp: end ---
 
 
+# Files the resolver and NSS read after confinement (the unjailed proxy resolves the API name per connection).
+RESOLVER_FILES = ("/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf", "/etc/host.conf", "/etc/gai.conf",
+                  "/etc/services", "/etc/localtime")
+
+
+def install_landlock(remove_in=(), required=True):
+    """Confine this process with Landlock: it may read the interpreter, the libraries and /etc (certificates,
+    resolver, NSS) and nothing else on disk, write nowhere, delete files only in the directories named in
+    remove_in (its own socket), and (Landlock ABI 6+) neither connect to abstract unix sockets of other
+    processes nor signal them. Without it a compromised proxy reads every world-readable file on the host and
+    reaches host abstract sockets, which have no permission check. Returns the ABI used; raises OSError if
+    it can't be applied and required is set, else returns 0."""
+    import ctypes
+    import ssl
+    import struct
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.syscall.restype = ctypes.c_long
+
+    def sc(nr, *args):
+        r = libc.syscall(ctypes.c_long(nr), *[ctypes.c_long(a) if isinstance(a, int) else a for a in args])
+        if r < 0:
+            raise OSError(ctypes.get_errno(), os.strerror(ctypes.get_errno()))
+        return r
+
+    NR_CREATE, NR_ADD, NR_RESTRICT = 444, 445, 446   # x86_64
+    try:
+        abi = sc(NR_CREATE, 0, 0, 1)                  # LANDLOCK_CREATE_RULESET_VERSION
+        if abi < 1:
+            raise OSError(0, "landlock ABI 0")
+        # Filesystem rights by ABI: 0-12 always, REFER (2), TRUNCATE (3), IOCTL_DEV (5).
+        fs = 0x1FFF | (1 << 13 if abi >= 2 else 0) | (1 << 14 if abi >= 3 else 0) | (1 << 15 if abi >= 5 else 0)
+        scoped = 0x3 if abi >= 6 else 0               # abstract unix sockets, signals
+        size = 24 if abi >= 6 else 16 if abi >= 4 else 8
+        attr = ctypes.create_string_buffer(struct.pack("<QQQ", fs, 0, scoped)[:size])
+        rs = sc(NR_CREATE, ctypes.addressof(attr), size, 0)
+    except OSError as e:
+        if required:
+            raise OSError(e.errno, f"landlock unavailable: {e.strerror}")
+        return 0
+    READ, FILE_BITS, REMOVE_FILE = 0x1 | 0x4 | 0x8, 0x1 | 0x2 | 0x4 | (1 << 14) | (1 << 15), 0x20
+    paths = {}   # path -> access
+
+    def allow(p, access):
+        if p and os.path.exists(p):
+            paths[p] = paths.get(p, 0) | access
+
+    for p in ("/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc", sys.prefix, sys.base_prefix, sys.exec_prefix):
+        allow(p, READ)
+    vp = ssl.get_default_verify_paths()
+    # Landlock checks the file a path resolves to, not the path: a symlink out of the trees above is denied.
+    # On systemd-resolved hosts /etc/resolv.conf is one (-> /run/systemd/resolve/stub-resolv.conf), and
+    # without its target glibc falls back to 127.0.0.1:53 and every lookup fails. So allow where each of
+    # these really lives. The directory, not the file: a rule on a file is bound to its inode, and resolved
+    # (like a CA bundle update) replaces the file by rename.
+    for p in (vp.cafile, vp.capath, vp.openssl_cafile, vp.openssl_capath) + RESOLVER_FILES:
+        if p and os.path.exists(p):
+            for q in {p, os.path.realpath(p)}:
+                allow(q if os.path.isdir(q) else os.path.dirname(q), READ)
+    allow("/dev/null", 0x2 | 0x4)
+    allow("/dev/urandom", 0x4)
+    for p in remove_in:
+        allow(p, REMOVE_FILE)
+    try:
+        for p, access in paths.items():
+            fd = os.open(p, os.O_PATH | os.O_CLOEXEC)
+            try:
+                if not os.path.isdir(p):
+                    access &= FILE_BITS & fs
+                sc(NR_ADD, rs, 1, ctypes.create_string_buffer(struct.pack("<Qi", access, fd)), 0)   # PATH_BENEATH
+            finally:
+                os.close(fd)
+        if libc.prctl(38, ctypes.c_ulong(1), ctypes.c_ulong(0), ctypes.c_ulong(0), ctypes.c_ulong(0)) != 0:
+            raise OSError(ctypes.get_errno(), "prctl(PR_SET_NO_NEW_PRIVS)")
+        sc(NR_RESTRICT, rs, 0)
+    except OSError as e:
+        if required:
+            raise OSError(e.errno, f"landlock: {e.strerror}")
+        return 0
+    finally:
+        os.close(rs)
+    return abi
+
+
 def main():
     global TOKEN, LOG, BUDGET, ADDRS
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
@@ -781,12 +947,17 @@ def main():
     ap.add_argument("--models", default="")
     ap.add_argument("--max-connections", type=int, default=16, help="concurrent guest connections (default 16)")
     ap.add_argument("--idle-timeout", type=float, default=30, help="seconds a guest connection may sit idle (default 30)")
+    ap.add_argument("--max-inflight-bytes", type=int, default=128 << 20,
+                    help=f"request-body memory budget, counted at {BODY_COST}x the body size (default 128 MiB: one largest body); 0 = none")
+    ap.add_argument("--landlock", choices=("auto", "require", "off"), default="auto",
+                    help="confine the proxy's filesystem and abstract-socket reach after startup; auto uses it when the kernel has it, require stops without it")
     ap.add_argument("--max-log-lines", type=int, default=5000, help="log lines per session before the log stops (default 5000)")
     ap.add_argument("--upstream-addr", action="append", default=[],
                     help=f"IP address for {UPSTREAM} (repeatable); default: resolve the name")
     a = ap.parse_args()
     BUDGET = Budget(a.max_requests, a.max_input_tokens, a.max_output_tokens, a.rpm, a.models)
     ADDRS = a.upstream_addr
+    INFLIGHT.cap = max(0, a.max_inflight_bytes)
     Server.max_connections = max(1, a.max_connections)
     Handler.timeout = a.idle_timeout
     LOG_LIMIT.cap = a.max_log_lines
@@ -822,8 +993,20 @@ def main():
         f"{a.max_log_lines} log lines", always=True)
     # Token read, log open, socket bound: from here on the proxy only serves. Unix sockets for the guest,
     # TCP to the API; no other socket family.
+    if a.landlock != "off":
+        try:
+            abi = install_landlock(remove_in=(os.path.dirname(os.path.abspath(a.listen)),), required=a.landlock == "require")
+        except OSError as e:
+            sys.exit(f"api-proxy: {e}; not running without Landlock (--landlock require)")
+        log(f"landlock: ABI {abi} (reads: interpreter, libraries, /etc; no writes; "
+            f"{'abstract sockets and signals scoped' if abi >= 6 else 'no scoping before ABI 6'})" if abi
+            else "landlock: not available on this kernel, running without it", always=True)
+    # With the upstream addresses pinned (the jail) nothing resolves a name, so no AF_UNIX socket is needed
+    # once the listener is bound: a compromised proxy can't open one to a host service. Unpinned, glibc's
+    # resolver may want one (nscd, systemd-resolved), so it stays.
     try:
-        install_seccomp(socket_families=(socket.AF_UNIX, socket.AF_INET, socket.AF_INET6))
+        fams = (socket.AF_INET, socket.AF_INET6) if ADDRS else (socket.AF_UNIX, socket.AF_INET, socket.AF_INET6)
+        install_seccomp(socket_families=fams)
     except OSError as e:
         sys.exit(f"api-proxy: {e}; not running without the seccomp filter")
     log("seccomp: filter loaded", always=True)

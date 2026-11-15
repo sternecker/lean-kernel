@@ -46,21 +46,25 @@ fi
 
 # shellcheck disable=SC1091
 source "$ROOT/VERSION"
+tmp="$(mktemp -d)"; trap 'rm -rf -- "$tmp"' EXIT
 # The release tarball, under the name deps-check.sh uses or an earlier download's; it must match the pin.
+# Copied into the root-owned $tmp first and checked there: bin/ is writable by the repo owner, so hashing
+# bin/'s file and extracting it afterwards would let a swap between the two get root to run its contents.
 tgz=""
 for t in "$ROOT/bin/firecracker-$FIRECRACKER_VERSION-x86_64.tgz" "$ROOT/bin/fc.tgz"; do
-  [[ -f "$t" ]] && echo "$FIRECRACKER_SHA256  $t" | sha256sum -c --quiet - 2>/dev/null && { tgz="$t"; break; }
+  [[ -f "$t" ]] || continue
+  cp -- "$t" "$tmp/release.tgz" 2>/dev/null || continue
+  if echo "$FIRECRACKER_SHA256  $tmp/release.tgz" | sha256sum -c --quiet - 2>/dev/null; then tgz="$tmp/release.tgz"; srcname="$t"; break; fi
 done
 command -v nft >/dev/null || { echo "nft is needed for the proxy's egress rule: apt install nftables" >&2; exit 1; }
 [[ -n "$tgz" ]] || { echo "no Firecracker $FIRECRACKER_VERSION tarball in bin/ matching FIRECRACKER_SHA256; run make deps" >&2; exit 1; }
-echo "firecracker tarball: $tgz (sha256 ok)"
+echo "firecracker tarball: $srcname (sha256 ok, checked on a root-owned copy)"
 
 # lean-fc ran Firecracker before it got a uid per run; nothing uses it now.
 if getent passwd lean-fc >/dev/null; then userdel lean-fc; fi
 getent passwd lean-proxy >/dev/null || useradd --system --user-group --no-create-home \
   --home-dir /nonexistent --shell /usr/sbin/nologin --comment "lean-kernel agent jail" lean-proxy
 
-tmp="$(mktemp -d)"; trap 'rm -rf -- "$tmp"' EXIT
 tar xzf "$tgz" -C "$tmp"
 rel="$tmp/release-$FIRECRACKER_VERSION-x86_64"
 install -d -o root -g root -m 0755 "$LIB"
