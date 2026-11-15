@@ -30,6 +30,8 @@ declare -A accepted=()
 while read -r opt which _; do
   [[ -z "$opt" || "$opt" == \#* ]] && continue
   [[ "$which" == all || "$which" == "$build" || "$which" == "$profile" ]] && accepted[$opt]=1
+  # vmware-vmci is the vmware profile plus vmci.fragment: it inherits the vmware entries.
+  [[ "$profile" == vmware-vmci && "$which" == vmware ]] && accepted[$opt]=1
 done < "$ROOT/configs/checker-accepted.txt"
 
 declare -A failing=()
