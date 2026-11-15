@@ -87,6 +87,7 @@ host_now="$(readlink -f "$(command -v claude 2>/dev/null)" 2>/dev/null || true)"
 bb="$(command -v busybox)" || die "busybox not installed ($PKG_INSTALL $(pkg busybox-static busybox))"
 socat_bin="$(command -v socat)" || die "socat not installed ($PKG_INSTALL socat)"
 bash_bin="$(readlink -f /bin/bash)"
+require_firecracker_build
 grep -q "^# CONFIG_INET is not set" "$OUT/.config" 2>/dev/null \
   && die "out/.config is the vsock-only profile; the agent bridge needs loopback TCP (rebuild without VSOCK_ONLY=1)"
 

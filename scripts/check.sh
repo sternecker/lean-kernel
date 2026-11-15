@@ -20,7 +20,18 @@ fi
 [[ -z "$(git -C "$khc" status --porcelain)" ]] || die "kernel-hardening-checker checkout has local changes; refusing to run it"
 
 build=gcc; [[ "$LLVM" == "1" ]] && build=clang
-profile=default; [[ "$VSOCK_ONLY" == "1" ]] && profile=vsock; [[ "$VMWARE" == "1" ]] && profile=vmware; [[ "$VMCI" == "1" ]] && profile=vmware-vmci
+# Which checker-accepted.txt scopes apply: all, the compiler, and the profile $OUT holds (from its verified
+# config, else what the environment asks for). A profile is named by its layers, lean-<a>-<b>, and each
+# layer adds to the one before it, so lean-vmware-vmci takes the vmware entries and the vmware-vmci ones.
+prof="$(built_profile)"; prof="${prof:-$PROFILE}"
+scopes=(all "$build")
+if [[ "$prof" == lean ]]; then
+  scopes+=(default)
+else
+  IFS=- read -ra layers <<< "${prof#lean-}"; acc=""
+  for l in "${layers[@]}"; do acc="${acc:+$acc-}$l"; scopes+=("$acc"); done
+fi
+profile="${prof#lean-}"; [[ "$prof" == lean ]] && profile=default
 report="$(cd "$khc" && python3 -I ./bin/kernel-hardening-checker -c "$OUT/.config" -m show_fail)" \
   || die "kernel-hardening-checker failed to run"
 echo "$report"
@@ -29,9 +40,7 @@ echo
 declare -A accepted=()
 while read -r opt which _; do
   [[ -z "$opt" || "$opt" == \#* ]] && continue
-  [[ "$which" == all || "$which" == "$build" || "$which" == "$profile" ]] && accepted[$opt]=1
-  # vmware-vmci is the vmware profile plus vmci.fragment: it inherits the vmware entries.
-  [[ "$profile" == vmware-vmci && "$which" == vmware ]] && accepted[$opt]=1
+  for s in "${scopes[@]}"; do [[ "$which" == "$s" ]] && accepted[$opt]=1; done
 done < "$ROOT/configs/checker-accepted.txt"
 
 declare -A failing=()

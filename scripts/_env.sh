@@ -102,3 +102,20 @@ VMCI="${VMCI:-0}"
 
 die() { echo "error: $*" >&2; exit 1; }
 note() { echo "== $*"; }
+
+# The profile $OUT actually holds, whatever the environment asks for now: the one whose verified copy
+# (make config saves $PROFILE-<version>.config, make build keeps .config identical to it) matches
+# $OUT/.config. Empty if none does (not configured, or configured by hand).
+built_profile() {
+  local f
+  [[ -f "$OUT/.config" ]] || return 0
+  for f in "$OUT"/lean*-"$KERNEL_VERSION".config; do
+    [[ -f "$f" ]] && cmp -s "$f" "$OUT/.config" && { f="${f##*/}"; echo "${f%-"$KERNEL_VERSION".config}"; return 0; }
+  done
+}
+# For the scripts that boot $OUT/bzImage in Firecracker: a VMware build boots from an ISO (scripts/mkiso.sh).
+# Without this its missing TCP/IP reads as VSOCK_ONLY=1 further on, and the messages point the wrong way.
+require_firecracker_build() {
+  local p; p="$(built_profile)"
+  [[ "$p" != lean-vmware* ]] || die "$OUT holds the $p build, which boots from an ISO (scripts/mkiso.sh), not in Firecracker; use a LEAN_OUT with a Firecracker profile"
+}

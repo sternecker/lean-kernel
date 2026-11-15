@@ -6,6 +6,7 @@
 source "$(dirname "$0")/_env.sh"
 
 [[ -x "$FC" ]] || die "firecracker missing; run make deps"
+require_firecracker_build
 [[ -f "$OUT/bzImage" ]] || die "no out/bzImage; run make build"
 
 note "building probe and jail-exec (static)"

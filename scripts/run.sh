@@ -4,6 +4,7 @@
 source "$(dirname "$0")/_env.sh"
 
 [[ -x "$FC" ]] || die "firecracker missing; run make deps"
+require_firecracker_build
 [[ -f "$OUT/bzImage" ]] || die "no out/bzImage; run make build"
 [[ -f "$OUT/rootfs.ext4" ]] || die "no out/rootfs.ext4; run make rootfs"
 

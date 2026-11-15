@@ -1,6 +1,7 @@
 # kernel-hardening-checker FAILs reviewed and accepted for this guest. make check fails on any
 # other FAIL. Format: OPTION SCOPE REASON, where SCOPE is all, clang (LLVM=1), gcc (LLVM=0) or vsock
-# (VSOCK_ONLY=1, the profile without TCP/IP) or vmware (VMWARE=1, the PCI/ACPI/EFI profile; VMWARE=1 VMCI=1 inherits these).
+# (VSOCK_ONLY=1, the profile without TCP/IP) or vmware (VMWARE=1, the PCI/ACPI/EFI profile). A profile gets
+# the scopes of each of its layers: VMWARE=1 VMCI=1 gets vmware and vmware-vmci.
 # Remove a line when the checker stops failing it (make check says so). HOWTO "Accepted checker
 # failures" has the longer reasoning.
 
