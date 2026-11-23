@@ -27,7 +27,7 @@ jobs:
           apt-get -o Acquire::Retries=0 install -y -q --no-install-recommends \
             make gcc flex bison bc dwarves cpio curl ca-certificates xz-utils git patch python3 \
             e2fsprogs libelf-dev libssl-dev clang-22 lld-22 llvm-22
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2, pinned like every other input
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1, pinned like every other input
       - name: Fetch (pinned tarball)
         run: make fetch
       - name: Config (every fragment line verified)

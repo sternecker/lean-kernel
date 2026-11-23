@@ -2,7 +2,7 @@
 # had an outside review. Bump MINOR when a security boundary changes (jail, proxy policy, config fragments, a pin
 # below), PATCH for fixes and docs. Tag the commit v$LEAN_KERNEL_VERSION; `make version` prints it with the pins.
 # SECURITY.md asks reporters for this value and the commit.
-LEAN_KERNEL_VERSION=0.3.0
+LEAN_KERNEL_VERSION=0.4.0
 
 # Pinned versions of what the build fetches. Bump here, then: make deps fetch config build check
 KERNEL_SERIES=6.18
@@ -11,9 +11,9 @@ KERNEL_URL=https://cdn.kernel.org/pub/linux/kernel/v6.x
 # sha256 of linux-$KERNEL_VERSION.tar.xz. On a bump: scripts/fetch-kernel.sh --pin prints it (checked against
 # kernel.org's signed sha256sums.asc when gpg has the autosigner key).
 KERNEL_SHA256=c92606f956f09dc50b5a0e2af9e86763fce27ada1647de97f8d1ac8cfc95801d
-FIRECRACKER_VERSION=v1.17.0
-FIRECRACKER_SHA256=06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558
-# v1.17.0: published 2026-09-10T14:19:40Z, tag commit 95f868c8e345b1cc8faccd1a3c910b4989dc3f58, pinned 2026-11-08 (hash confirmed via centos10;
+FIRECRACKER_VERSION=v1.18.0
+FIRECRACKER_SHA256=1ac8eec866dd5eea14efecf6323e22b23eea24054545338a5b34bc5bca6623cd
+# v1.18.0: published 2026-11-09T14:08:01Z, tag commit eaf83bb718a559d324613d566eaf776b31a62340, pinned 2026-11-23 (hash from the release's own .sha256.txt; not confirmed from a second machine: no --via;
 # scripts/fetch-firecracker.sh --pin prints these lines. Firecracker ships unsigned: the pin is the anchor, see HOWTO §8)
 # Claude Code in the agent image, pinned: jail-exec's syscall allowlist was traced against this version.
 # Bump: install the new version on the host, scripts/mkrootfs-agent.sh --pin <version> prints both lines,
