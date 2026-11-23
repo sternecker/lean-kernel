@@ -68,12 +68,13 @@ qemu-system-x86_64 -M q35 -accel kvm -cpu host -m 512 -nodefaults -nographic -se
 
 ## What was tested
 
-On Debian 13, kernel 6.18.62, QEMU with KVM:
+On Debian 13, kernel 6.18.65 (rechecked 2026-11-23), QEMU with KVM:
 
 | Check | Result |
 |---|---|
 | `configure.sh` | pass: 0 fragment lines failed |
 | `check.sh` (checker) | pass: 18 FAILs, all accepted for the `vmware` scope |
+| `VMCI=1` build (`out-vmware-vmci`), `configure.sh` + `build.sh` + `check.sh` | pass: 18 FAILs, all accepted for the `vmware-vmci` scope (not booted: needs VMware) |
 | Default (Firecracker) config | unchanged: byte-identical; its checker still passes with 15 accepted |
 | Kernel + initramfs, `-M q35`, no disk, a vmxnet3 attached | pass: `/sys/block` empty, only `lo` in `/sys/class/net`, no TCP/UDP in `/proc/net` |
 | ISO, BIOS (SeaBIOS), `q35` and `pc` | pass: GRUB menu, kernel, shell, clean ACPI reboot |
