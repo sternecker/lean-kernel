@@ -409,6 +409,11 @@ def post(b):
 
 check("handler: dense JSON body refused (413)", post(body(messages=[[] for _ in range(20000)])) == 413)
 check("handler: ordinary body still forwarded", post(body()) == 502)
+# The handler thread releases after it has written the reply, which the client can read first: wait for it.
+for _ in range(100):
+    if ap.INFLIGHT.used == 0:
+        break
+    time.sleep(0.02)
 check("handler: in-flight bytes released", ap.INFLIGHT.used == 0, ap.INFLIGHT.used)
 ap.INFLIGHT = keep_inflight
 

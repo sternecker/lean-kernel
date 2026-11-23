@@ -185,7 +185,13 @@ def main():
     b = Bridge(a.allow_cid, a.upstream, a.max_connections, a.upstream_idle_timeout)
     log(f"vsock port {a.port} -> {a.upstream} (allow cid {sorted(b.allow)}, max {a.max_connections} each)", always=True)
     while True:
-        conn, (cid, _port) = srv.accept()
+        try:
+            conn, (cid, _port) = srv.accept()
+        except OSError as e:
+            # EMFILE, ECONNABORTED, ENOBUFS...: one failed accept must not end the bridge and cut the guest off.
+            log(f"accept failed: {e}")
+            time.sleep(0.1)
+            continue
         b.handle(conn, cid_u32(cid))
 
 
