@@ -9,8 +9,10 @@
 #              Firecracker runs as a uid of its own per run (FC_UID_BASE.. in the conf, no passwd entry),
 #              claimed under /run/lean-agent/uids. An older install's lean-fc user is removed.
 #   files      /usr/local/lib/lean-agent/{jailer,firecracker}  root-owned copies from the release
-#                tarball, re-verified against FIRECRACKER_SHA256 in VERSION. Root must never run the
-#                copies in bin/, which the repo owner can write.
+#                tarball, re-verified against FIRECRACKER_SHA256 in VERSION. Root never runs the
+#                copies in bin/, which the repo owner can write: it hashes and unpacks a root-owned copy.
+#                What it does run from this checkout is VERSION (sourced) and scripts/seccomp-filter.sh,
+#                which the owner can write: run the installer from a checkout you trust, as with any sudo script.
 #              /usr/local/lib/lean-agent/seccomp-filter.{bpf,json}  Firecracker's seccomp filter: the
 #                release's own minus io_uring, default kill_process (scripts/seccomp-filter.sh), compiled
 #                here from the verified tarball's JSON with its seccompiler

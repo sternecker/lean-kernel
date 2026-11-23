@@ -22,6 +22,9 @@ Passed:
   - OSC 10/11/12 ;? (foreground/background/cursor colour queries; the reply holds only colour values)
 
 Dropped:
+  - CSI ... * y (DECRQCRA: the reply is a checksum of a screen rectangle, so one-cell rectangles read back
+    what was on the host's screen), CSI 3 J (erase saved lines) and ESC c (RIS, full reset: both wipe the
+    host terminal's scrollback)
   - every other OSC: 52 (clipboard write and read), 8 (hyperlinks), 4/10/11/12 colour changes,
     7 (cwd), 9/99/777 (notifications), 133, 1337 (iTerm2), ...
   - DCS, APC, PM and SOS strings (DECRQSS, sixel, kitty graphics, tmux passthrough, ...)
@@ -138,8 +141,9 @@ class Filter:
                 self.state = STRING
             elif 0x20 <= o <= 0x2F:                 # ESC intermediate ... final, e.g. ESC ( B
                 self.state, self.buf = ESC_INTER, [c]
-            elif 0x30 <= o <= 0x7E:                 # ESC 7, ESC 8, ESC =, ESC >, ESC M, ESC c, ...
-                out.append(ESC + c)
+            elif 0x30 <= o <= 0x7E:                 # ESC 7, ESC 8, ESC =, ESC >, ESC M, ...; not ESC c (RIS)
+                if c != "c":                        # full reset clears the host's screen and scrollback
+                    out.append(ESC + c)
                 self.state = GROUND
             else:                                   # control or non-ASCII after ESC: drop the ESC
                 self.state = GROUND
@@ -209,6 +213,10 @@ class Filter:
         if BIG_PARAM.search(params):
             return
         if final == "i":   # media copy: printing
+            return
+        if final == "y" and "*" in inter:   # DECRQCRA: the reply is a checksum of screen cells, which reads back what was on screen
+            return
+        if final == "J" and params.lstrip("?").split(";")[0] == "3":   # erase saved lines: wipes the host's scrollback
             return
         if final == "t" and not inter:
             if params[:1] in ("<", "=", ">", "?"):

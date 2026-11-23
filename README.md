@@ -63,8 +63,7 @@ guest/jit-probe.c        posture probe: can this process get writable+executable
 guest/tool-shell.c       /bin/bash in the agent image: PR_SET_MDWE (kernel W^X) + a seccomp backstop, then the real bash
 guest/agent-selftest.sh  the agent VM's hardening, checked from inside it (make agent-test)
 vm/vm.json.in            Firecracker config template
-docs/                    architecture diagrams (target design; as built: HOWTO §9.5);
-                         security-review-2026-11-07.md: whole-repo review, findings, fixes, version check, export-control note
+docs/                    architecture diagrams (target design; as built: HOWTO §9.5)
 .github/workflows/       CI: fetch, config, build, check, syscalls (no boot, nothing published)
 bin/                     Firecracker release binaries (gitignored, fetched by deps-check)
 work/                    kernel source + build tree (gitignored)

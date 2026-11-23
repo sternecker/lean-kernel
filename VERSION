@@ -2,7 +2,7 @@
 # had an outside review. Bump MINOR when a security boundary changes (jail, proxy policy, config fragments, a pin
 # below), PATCH for fixes and docs. Tag the commit v$LEAN_KERNEL_VERSION; `make version` prints it with the pins.
 # SECURITY.md asks reporters for this value and the commit.
-LEAN_KERNEL_VERSION=0.2.0
+LEAN_KERNEL_VERSION=0.3.0
 
 # Pinned versions of what the build fetches. Bump here, then: make deps fetch config build check
 KERNEL_SERIES=6.18

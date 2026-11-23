@@ -15,6 +15,10 @@ E, ST = "\x1b", "\x1b\\"
 CASES = [
     # (input, expected output)
     ("hello\r\n\tok\x07\b", "hello\r\n\tok\x07\b"),
+    # B2: DECRQCRA (screen read-back), erase saved lines, and RIS are dropped; ordinary erase still passes
+    (f"a{E}[1;1;1;1;1;1*yb", "ab"),
+    (f"a{E}[3Jb{E}[?3Jc{E}[2Jd{E}[Je", f"ab{E}[?3J".replace(f"{E}[?3J","")+"c"+f"{E}[2Jd{E}[Je"),
+    (f"a{E}cb", "ab"),
     ("a\x00b\x0ec\x7fd\x9be\x1af", "abcdef"),
     (f"{E}[1;38;2;10;20;30mX{E}[0m", f"{E}[1;38;2;10;20;30mX{E}[0m"),
     (f"{E}[?1049h{E}[?2026h{E}[2J{E}[H{E}[>1u{E}[?u{E}[c{E}[6n", f"{E}[?1049h{E}[?2026h{E}[2J{E}[H{E}[>1u{E}[?u{E}[c{E}[6n"),

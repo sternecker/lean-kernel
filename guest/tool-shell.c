@@ -91,7 +91,7 @@ int main(int argc, char **argv)
 		// refused whatever the flags; PROT_EXEC with MAP_ANONYMOUS is refused whatever the prot.
 		EQ(SYS_mmap, 0, 7),
 		LOAD(args[2]),
-		SET(PROT_EXEC, 0, 5),
+		SET(PROT_EXEC, 0, 4),
 		SET(PROT_WRITE, 2, 0),
 		LOAD(args[3]),
 		SET(MAP_ANONYMOUS, 0, 1),

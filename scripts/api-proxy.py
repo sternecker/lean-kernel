@@ -175,9 +175,9 @@ def _walk(v, depth=0, kind="top"):
         # tool can't be put there bare or under a wrapper this check doesn't know.
         if v.get("type") in ("tool_addition", "tool_removal"):
             t = v.get("tool")
-            kind = t.get("type") if isinstance(t, dict) else None
-            if kind not in ("tool_definition", "tool_reference"):
-                return f"{v['type']} of {_short(kind)} not allowed"
+            tkind = t.get("type") if isinstance(t, dict) else None
+            if tkind not in ("tool_definition", "tool_reference"):
+                return f"{v['type']} of {_short(tkind)} not allowed"
         if v.get("type") == "tool_definition":
             why = _tool_why(v.get("definition"))
             if why:
@@ -258,6 +258,9 @@ def upstream_headers(items):
     None if the request may go upstream with headers, which never carry anything the guest sent unchecked."""
     out, betas, versions = {}, [], set()
     for k, v in items:
+        # A value continued on a folded line keeps its line break; nothing sent upstream may carry one.
+        if "\r" in v or "\n" in v:
+            return "line break in a header value", None
         name = k.lower()
         if name == "anthropic-beta":
             betas += [b.strip() for b in v.split(",") if b.strip()]
@@ -333,6 +336,11 @@ class Budget:
                     return None
             self.denied += 1
             return why
+
+    def note_refused(self):
+        """A request the proxy's policy refused before admit() (path, headers, body): counted as refused too."""
+        with self.lock:
+            self.denied += 1
 
     def charge(self, inp, out, est=(0, 0)):
         """Add the usage, and release the reservation admit() made (est, the same pair)."""
@@ -464,8 +472,6 @@ TLS.check_hostname = True
 TLS.verify_mode = ssl.CERT_REQUIRED
 TLS.load_default_certs()
 TLS.minimum_version = ssl.TLSVersion.TLSv1_2
-TLS.options |= ssl.OP_NO_TLSv1
-TLS.options |= ssl.OP_NO_TLSv1_1
 LOG = sys.stderr
 
 
@@ -533,7 +539,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # replaced by log() lines below
         pass
 
-    def deny(self, code, msg, etype="proxy_denied"):
+    def deny(self, code, msg, etype="proxy_denied", counted=False):
+        if not counted:   # admit() already counted its own refusals
+            BUDGET.note_refused()
         body = json.dumps({"type": "error", "error": {"type": etype, "message": msg}}).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
@@ -610,7 +618,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if refused:
             code, etype, msg = refused
             log(f"{'LIMIT' if code == 429 else 'DENY '} {self.command} {path_only} ({msg})")
-            return self.deny(code, msg, etype)
+            return self.deny(code, msg, etype, counted=True)
         usage = None
 
         headers["content-length"] = str(len(body))
@@ -657,7 +665,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except Exception as e:  # upstream failure: tell the guest, never leak details of the request
             log(f"ERROR {self.command} {path_only}: {type(e).__name__}: {e}")
             if status == "-":
-                return self.deny(502, "upstream request failed")
+                return self.deny(502, "upstream request failed", counted=True)
         finally:
             up.close()
             self.close_connection = True
