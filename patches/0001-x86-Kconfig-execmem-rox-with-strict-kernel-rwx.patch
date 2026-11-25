@@ -3,7 +3,7 @@ x86/Kconfig: enable the execmem ROX cache when STRICT_KERNEL_RWX is set
 Upstream: Mike Rapoport, "x86/Kconfig: enable ROX cache in execmem when
 STRICT_KERNEL_RWX is set" (lkml, 2025-09-30), resent 2026 with
 Fixes: 47410d839fcd ("x86/Kconfig: only enable ROX cache in execmem when STRICT_MODULE_RWX is set")
-and Acked-by Rapoport and Peter Zijlstra. Not in 6.18.62. Drop this file once the pinned kernel has it
+and Acked-by Rapoport and Peter Zijlstra. Not in 6.18.65. Drop this file once the pinned kernel has it
 (make fetch then fails to apply it, which is the signal).
 
 Why this build needs it: CONFIG_MODULES=n means STRICT_MODULE_RWX does not exist, so

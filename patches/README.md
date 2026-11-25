@@ -13,7 +13,7 @@ fix, `make fetch` fails to apply the patch; delete it then.
 
 | Patch | Fixes | Upstream |
 |---|---|---|
-| `0001-x86-Kconfig-execmem-rox-with-strict-kernel-rwx.patch` | ITS thunk pages left writable+executable with `MODULES=n` (`DEBUG_WX`: "6 W+X pages found" on ITS-affected hosts) | Mike Rapoport, lkml 2025-09-30; 2026 resend with Fixes: 47410d839fcd, acked. Not in 6.18.62. |
+| `0001-x86-Kconfig-execmem-rox-with-strict-kernel-rwx.patch` | ITS thunk pages left writable+executable with `MODULES=n` (`DEBUG_WX`: "6 W+X pages found" on ITS-affected hosts) | Mike Rapoport, lkml 2025-09-30; 2026 resend with Fixes: 47410d839fcd, acked. Not in 6.18.65. |
 
 Adding one: save the upstream patch as `NNNN-<topic>.patch` with the header, check it applies
 (`patch -p1 --dry-run -d work/linux-<version> < patches/NNNN-*.patch`), then `make fetch config build check`
