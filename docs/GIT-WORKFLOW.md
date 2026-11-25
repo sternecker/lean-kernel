@@ -4,23 +4,24 @@ How to work in this repository with git when the code is security tooling: a har
 jail that runs as root on the host, and a proxy that holds a credential. A bad merge here is a security
 regression, not just a bug.
 
-Facts below were read from the repo on 2026-11-09. Re-check them with the commands in section 1 before
-relying on them, because branch counts go stale in days.
+The table in section 1 was last checked on 2026-11-25, the branch map below it on 2026-11-09. Re-check
+them with the commands in section 1 before relying on them, because branch counts go stale in days.
 
 ## 1. What this repo looks like
 
 | Fact | Value | Check it |
 |------|-------|----------|
 | Remote | `origin` = `github.com/sternecker/lean-kernel`, **public** | `git remote -v` |
-| Branches on origin | `main` only | `git branch -r` |
+| Branches on origin | `main`; `vmware` (the VMware/QEMU ISO profile; its hardening came to `main` separately); `alert-autofix-3` (merged, left over); topic branches while their PRs are open | `git branch -r` |
 | Local-only branches | `devtools`, `pantsdown` (never pushed) | `git branch -vv` |
 | Worktrees | one per branch: `~/repos/lean-kernel`, `~/repos/lean-kernel-devtools`, `~/repos/lean-kernel-pantsdown` | `git worktree list` |
-| Branch protection on `main` | none | `gh api repos/sternecker/lean-kernel/branches/main/protection` (404 = none) |
+| Branch protection on `main` | PR required (0 approvals), required checks `kernel` and `checks` from GitHub Actions, admins included, no force pushes or deletion (section 8) | `gh api repos/sternecker/lean-kernel/branches/main/protection` |
 | Commit signing | not configured | `git config commit.gpgsign` (empty) |
 | CI | `.github/workflows/build.yml` on every push and PR; read-only token, inputs pinned by digest. Job `kernel` runs `make fetch config build check syscalls`; job `checks` runs the `tests/*.py` policy tests, shellcheck, pyflakes, cppcheck, the invisible-character check and the guest C build. **No boot test runs in CI.** | `grep -n -E 'tests/\|shellcheck' .github/workflows/build.yml` |
 
-Because the repo is public and `main` is unprotected, **anything you push is published immediately and a
-force-push is possible by accident.** The rest of this document follows from that.
+Because the repo is public, **anything you push is published immediately**, topic branches included:
+protection only stops changes landing on `main` without a PR and green CI, and stops `main` being
+force-pushed or deleted. The rest of this document follows from that.
 
 ### Branch map (2026-11-09)
 
@@ -79,7 +80,7 @@ Rules:
    ```
    Kernel-side changes also need `make fetch config build check`. CI runs all of the above (the
    `checks` job also runs pyflakes, cppcheck and the guest C build with `-Werror`), but run them before
-   pushing anyway: on an unprotected `main` a push is published before CI has said anything. **Green
+   pushing anyway: a pushed branch is public before CI has said anything about it. **Green
    CI says nothing about boot behaviour.** The boot tests (`make test`, `make agent-test`) need KVM and
    Firecracker and cannot run in CI, so run them yourself before merging anything that touches the
    guest or the jail.
@@ -90,8 +91,22 @@ Rules:
    gh pr create --fill
    gh pr checks --watch
    ```
-5. Merge only when CI is green and you have re-read the diff after the last push:
-   `gh pr merge --squash --delete-branch` (or `--rebase` to keep commits). Then update local `main`.
+5. Merge only when CI is green and you have re-read the diff after the last push. Branch protection
+   refuses the merge until `kernel` and `checks` pass; CodeQL is not required (an outage on 2026-11-25
+   failed its results upload with no finding), so look at it yourself. Pick the method by what the
+   commits are worth:
+   - `gh pr merge --merge --delete-branch` when the PR is single-purpose commits (a pin bump, a
+     boundary change, its test): history keeps each one, with its SHA, so `git revert` and `git bisect`
+     can target it.
+   - `--squash` for a PR of fix-up commits that only make sense together.
+   - Never squash or rebase a PR that another PR is stacked on: the stacked one still carries the old
+     SHAs and shows them as new commits or conflicts.
+
+   Stacked PRs (B's base is A's branch): **deleting A's branch on merge closes B instead of
+   retargeting it.** Merge A without `--delete-branch`, retarget B
+   (`gh api -X PATCH repos/sternecker/lean-kernel/pulls/<B> -f base=main`), then delete A's branch. If
+   B was closed already: push A's old tip back to its branch name, reopen B, retarget it, delete the
+   branch again. Then update local `main`.
 
 ### Commit messages
 
@@ -220,17 +235,22 @@ and permanent. Before `git push -u origin <branch>`:
 - [ ] All tests pass and CI will have the inputs it needs.
 - [ ] You want the history, not just the tip, to be public. If not, squash to a clean branch first.
 
-## 8. Protecting `main` (recommended, not configured)
+## 8. Protecting `main` (configured 2026-11-25)
 
-On GitHub, Settings, Branches, add a rule for `main`:
+The rule on `main` (classic branch protection, `gh api repos/sternecker/lean-kernel/branches/main/protection`):
 
-- Require a pull request before merging.
-- Require the `build` status check to pass.
-- Block force pushes and deletion.
-- Do not allow bypass (or accept that "include administrators" off means you can still bypass).
+- A pull request is required, with **0 approvals**: GitHub doesn't let you approve your own PR, so one
+  required approval would lock the only maintainer out. Raise it when there is a second reviewer.
+- The `kernel` and `checks` jobs must pass, **bound to the GitHub Actions app** (app id 15368), so a
+  commit status posted under the same name by another app or token doesn't count.
+- Not "up to date before merging" (`strict: false`): with stacked PRs it forces an extra update round
+  for no review value. Turn it on if PRs start overlapping.
+- CodeQL is not a required check (see section 3, step 5).
+- Admins are included (`enforce_admins`), so the rule can't be bypassed by accident.
+- Force pushes and deletion of `main` are refused.
 
-For a solo repo this costs one extra click per change and removes the two worst failure modes: pushing
-a broken build and rewriting `main`.
+Changing it is a security decision like any other: `gh api -X PUT .../branches/main/protection` takes
+the whole rule, so read the current one first and send it back with only your change.
 
 Optionally sign commits so history proves who wrote it. SSH signing needs no GPG:
 
