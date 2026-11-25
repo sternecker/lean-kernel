@@ -431,6 +431,16 @@ i_, o_ = charged_after_hangup()
 check("handler: a guest that hangs up before the reply is still charged", o_ > 0 and i_ > 0, (i_, o_))
 
 # A body that is all JSON structure costs far more memory than its bytes: refused when it can never fit.
+# B3: a line break in a header value (a folded header) is refused, forwarded header or not.
+why, _ = ap.upstream_headers([("User-Agent", "a\r\n\tb")])
+check("headers: folded value refused", why is not None, why)
+why, _ = ap.upstream_headers([("X-Unlisted", "a\nb")])
+check("headers: line break in an unlisted header refused", why is not None, why)
+# A policy denial counts as refused in the session summary.
+ap.BUDGET = ap.Budget(0, 0, 0, 0, "")
+ap.BUDGET.note_refused()
+check("budget: policy denial counted", "1 refused" in ap.BUDGET.summary(), ap.BUDGET.summary())
+
 ap.UpstreamConnection = FakeUp
 ap.BUDGET = ap.Budget(0, 0, 0, 0, "")
 keep_inflight, ap.INFLIGHT = ap.INFLIGHT, ap.ByteBudget(1 << 20)
