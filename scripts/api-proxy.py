@@ -572,7 +572,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             log(f"DENY  {self.command} {path_only} ({why})")
             return self.deny(403, why)
         body = canonical(req)  # forward what was checked, not what was sent
-        if not canary:  # JSON escapes are decoded now: "placeholder-..." is plain text here
+        if not canary:  # JSON escapes are decoded now: "\u0070laceholder-..." is plain text here
             CANARY_HITS.check(self.command, path_only, body)
         refused = BUDGET.admit(req.get("model"))
         if refused:
