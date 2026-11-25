@@ -35,6 +35,9 @@ check("wrapper: proxy reads the checked token path", 'as_owner cat -- "$tok_real
 check("wrapper: waits for the VM after the jailer exits", re.search(r'wait "\$fc".*while vm_running', jail, re.S) is not None)
 # The proxy runs confined (Landlock required) in the jail.
 check("wrapper: proxy needs Landlock", "--landlock require" in jail)
+check("wrapper: proxy must still be running before the VM starts", re.search(r'kill -0 "\$proxy".*"\$LIB/jailer"', jail, re.S) is not None)
+check("wrapper: --check probes Landlock", "/sys/kernel/security/lsm" in jail)
+check("wrapper: OOM kill of the VM is not a clean exit", "oom_kill" in jail and "exit 137" in jail)
 # Every guest-derived line run-agent.sh prints passes through sanitize.
 check("run-agent: MANAGED-HOOKS line sanitized",
       re.search(r"grep -m1 '\^MANAGED-HOOKS='[^\n]*\| sanitize", run) is not None)

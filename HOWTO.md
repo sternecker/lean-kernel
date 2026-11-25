@@ -568,7 +568,8 @@ the first jailed run and removed by uninstall, lets uid `lean-proxy` open TCP 44
 everything else it sends. Firecracker also gets a file size limit (`fsize`): the scratch drive plus 64 MiB.
 It runs in its own PID namespace (`--new-pid-ns`), as that namespace's init, so it sees no host process. The jailer
 exits as soon as it has started Firecracker, so the wrapper waits on the VM's cgroup (or, with `CGROUPS=0`, on the run's
-uid) and exits 0 when the VM is gone; Firecracker's own exit status is not passed on.
+uid) and exits 0 when the VM is gone, or 137 if the cgroup shows the OOM killer ended it; Firecracker's own exit
+status is otherwise not passed on (a VMM killed by its seccomp filter shows only in the kernel audit log).
 
 Not yet:
 - No project workspace: the agent gets an empty home (or a kept one), not a copy of your repo.

@@ -230,6 +230,10 @@ if [[ "${1:-}" == "--check" ]]; then
   fi
   ip netns list >/dev/null || die "ip netns not usable"
   echo "netns:       ok"
+  # The proxy is started with --landlock require and stops without it.
+  grep -qw landlock /sys/kernel/security/lsm 2>/dev/null \
+    || die "Landlock is not enabled on this host (not in /sys/kernel/security/lsm): the jailed proxy requires it; boot with lsm=...,landlock"
+  echo "landlock:    enabled"
   egress_setup
   echo "egress:      nftables table inet $NFT_TABLE, $UPSTREAM -> ${addrs[*]}"
   egress_probe || die "egress check failed"
@@ -386,6 +390,10 @@ chown -h "$fc_uid:$fc_gid" "$jail"
 
 # An empty network namespace: Firecracker needs no network (vsock only) and gets none.
 ip netns add "$ns"
+# The proxy binds its socket before it confines itself, and stops (removing the socket) if Landlock or the
+# seccomp filter can't be applied. So the socket having appeared is not proof it is serving: it must
+# still be running now, well after that point, or the VM would boot against a dead socket.
+kill -0 "$proxy" 2>/dev/null && [[ -S "$pdir/p.sock" ]] || die "api-proxy stopped during startup; see $RUNDIR/agent-proxy.log"
 
 cg=()
 if [[ "${CGROUPS:-1}" == 1 ]]; then
@@ -431,4 +439,10 @@ else
 fi
 vm_running || die "Firecracker exited at once; see $RUNDIR/firecracker.log"
 while vm_running; do sleep 0.2; done
+# No exit status to pass on, but the cgroup records one way of dying: the OOM killer at memory.max.
+# (A Firecracker killed by its seccomp filter leaves no trace here; the kernel audit log has it.)
+if [[ "${CGROUPS:-1}" == 1 ]] && grep -qE '^oom_kill [1-9]' "$fcg/memory.events" 2>/dev/null; then
+  echo "error: Firecracker was killed by the OOM killer at memory.max=$MEM_MAX" >&2
+  exit 137
+fi
 exit 0

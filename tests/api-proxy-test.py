@@ -155,6 +155,19 @@ check("budget: released reservation frees room", b.admit("m", 1, 500) is None an
 check("budget: a second request sees the output reservation", b.admit("m", 1, 1) is not None)
 b.charge(0, 0, (1, 500))
 check("budget: output reservation released", b.admit("m", 1, 1) is None)
+# Reservations alone reaching a limit is a retry (429); tokens actually spent reaching it ends the session (403).
+b = ap.Budget(0, 0, 50000, 0, "")
+check("budget: two parallel requests admitted", b.admit("m", 1, 32000) is None and b.admit("m", 1, 32000) is None)
+r = b.admit("m", 1, 32000)
+check("budget: reservation-only overflow is a 429", r is not None and r[0] == 429, r)
+b.charge(0, 50000, (1, 32000))
+r = b.admit("m", 1, 1)
+check("budget: spent budget is a 403", r is not None and r[0] == 403, r)
+# max_tokens is what the budget reserves: anything but a positive int is refused, not forwarded and counted as 0.
+for mt, ok in ((32000, True), (32000.0, False), ("32000", False), (True, False), (0, False), (-1, False)):
+    why, _ = ap.body_policy(json.dumps({"model": "m", "max_tokens": mt, "messages": []}).encode())
+    check(f"max_tokens {mt!r}", (why is None) == ok, why)
+check("max_tokens may be absent (count_tokens)", ap.body_policy(b'{"model":"m","messages":[]}')[0] is None)
 check("budget: unlimited ignores reservations", ap.Budget(0, 0, 0, 0, "").admit("m", 10**9, 10**9) is None)
 # A stream cut off before message_delta is charged what it asked for, not what it had streamed.
 u = ap.Usage("text/event-stream")
@@ -382,6 +395,73 @@ def charged(kind):
 
 
 import time
+
+
+# The guest hangs up while the API is still working: the reply it never read is billed, so it is charged
+# (it was charged nothing: usage was only set up after the headers had been written to the guest).
+def charged_after_hangup():
+    release = threading.Event()
+
+    class SlowUp(FakeUp):
+        def request(self, *a, **kw):
+            pass
+
+        def getresponse(self):
+            release.wait(5)
+            return FakeResp([START, DELTA, b'data: {"type":"message_delta","usage":{"output_tokens":7}}\n'] * 2000)
+
+    ap.UpstreamConnection = SlowUp
+    ap.BUDGET = ap.Budget(0, 0, 0, 0, "")
+    b = body(max_tokens=32000, stream=True)
+    s = socket.socket(socket.AF_UNIX)
+    s.connect(sock)
+    s.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+              b"Content-Length: " + str(len(b)).encode() + b"\r\n\r\n" + b)
+    time.sleep(0.2)
+    s.close()
+    release.set()
+    for _ in range(100):
+        if ap.BUDGET.out:
+            break
+        time.sleep(0.02)
+    return ap.BUDGET.inp, ap.BUDGET.out
+
+
+i_, o_ = charged_after_hangup()
+check("handler: a guest that hangs up before the reply is still charged", o_ > 0 and i_ > 0, (i_, o_))
+
+# A body that is all JSON structure costs far more memory than its bytes: refused when it can never fit.
+ap.UpstreamConnection = FakeUp
+ap.BUDGET = ap.Budget(0, 0, 0, 0, "")
+keep_inflight, ap.INFLIGHT = ap.INFLIGHT, ap.ByteBudget(1 << 20)
+
+
+def post(b):
+    s = socket.socket(socket.AF_UNIX)
+    s.connect(sock)
+    s.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+              b"Content-Length: " + str(len(b)).encode() + b"\r\n\r\n" + b)
+    line = s.makefile("rb").readline().split()
+    s.close()
+    return int(line[1]) if len(line) > 1 else None
+
+
+check("handler: dense JSON body refused (413)", post(body(messages=[[] for _ in range(20000)])) == 413)
+check("handler: ordinary body still forwarded", post(body()) == 502)
+check("handler: in-flight bytes released", ap.INFLIGHT.used == 0, ap.INFLIGHT.used)
+ap.INFLIGHT = keep_inflight
+
+# The proxy's seccomp filter refuses socketpair(): it would hand out AF_UNIX sockets socket() is denied.
+import subprocess
+snippet = (
+    "import importlib.util, socket, sys\n"
+    "s = importlib.util.spec_from_file_location('ap', sys.argv[1]); ap = importlib.util.module_from_spec(s); s.loader.exec_module(ap)\n"
+    "ap.install_seccomp(extra_deny=(53,), socket_families=(socket.AF_INET, socket.AF_INET6))\n"
+    "try:\n    socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)\n    sys.exit(1)\nexcept OSError:\n    sys.exit(0)\n")
+rc = subprocess.run([sys.executable, "-I", "-c", snippet, os.path.join(here, "..", "scripts", "api-proxy.py")]).returncode
+check("seccomp: socketpair refused", rc == 0, rc)
+check("main denies socketpair", "extra_deny=(53,)" in open(os.path.join(here, "..", "scripts", "api-proxy.py")).read())
+
 c = charged("error")
 check("handler: stream ended by an API error is charged what it streamed", 0 < c < 100, c)
 check("handler: stream cut off without an error is charged max_tokens", charged("cut") == 32000)
