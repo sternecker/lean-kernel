@@ -143,7 +143,7 @@ truncate -s %4096 "$task_img"
 # hide text on screen.
 sanitize() {
   python3 -I -c 'import re, sys
-sys.stdout.write(re.sub(r"[\x00-\x08\x0b-\x1f\x7f-\x9f؜​-‏‪-‮⁦-⁩﻿]", "", sys.stdin.buffer.read().decode("utf-8", "replace")))'
+sys.stdout.write(re.sub(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u061c\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]", "", sys.stdin.buffer.read().decode("utf-8", "replace")))'
 }
 log="$RUN/agent.log"
 plog="$RUN/agent-proxy.log"

@@ -25,7 +25,7 @@ CASES = [
     ("a\x9d52;c;Zm9v\x9cb", "a52;c;Zm9vb"),   # 8-bit OSC/ST dropped; payload is just text
     # other OSCs dropped; titles kept with controls stripped; colour queries kept, sets dropped
     (f"{E}]8;;https://evil/{ST}link{E}]8;;{ST}", "link"),
-    (f"{E}]2;my‮title{ST}", f"{E}]2;mytitle{ST}"),
+    (f"{E}]2;my\u202etitle{ST}", f"{E}]2;mytitle{ST}"),
     (f"{E}]0;t\x07", f"{E}]0;t{ST}"),
     (f"{E}]11;?\x07{E}]11;rgb:0/0/0\x07", f"{E}]11;?{ST}"),
     (f"{E}]1337;File=x\x07{E}]777;notify;a;b\x07", ""),
@@ -41,7 +41,7 @@ CASES = [
     # CAN inside a CSI: sequence dropped
     (f"{E}[3\x182J", "2J"),
     # bidi/format controls stripped from text, ZWJ kept
-    ("a‮b⁦c​d﻿‍", "abcd‍"),
+    ("a\u202eb\u2066c\u200bd\ufeff\u200d", "abcd\u200d"),
 ]
 
 # The payload list from Fredrik "STÖK" Alexandersson, "Weaponizing Plain Text: ANSI Escape Sequences as a
@@ -126,7 +126,7 @@ for inp, want in CASES:
 # queries, no string controls, and no bytes the filter is meant to drop.
 rng = random.Random(1)
 alphabet = ["\x1b", "[", "]", "P", "_", "\\", "\x07", "\x9c", "\x9b", "\x9d", ";", "5", "2", "c", "?", "t",
-            "i", "m", "2", "1", "0", "\x18", "\x00", "a", " ", "(", "‮"]
+            "i", "m", "2", "1", "0", "\x18", "\x00", "a", " ", "(", "\u202e"]
 for _ in range(20000):
     s = "".join(rng.choice(alphabet) for _ in range(rng.randint(1, 40)))
     out = run([s])
@@ -145,7 +145,7 @@ for _ in range(20000):
             print(f"FAIL fuzz title report {s!r} -> {out!r}")
             break
         j += 1
-    if any(ch in out for ch in "\x00\x18\x9b\x9c\x9d‮"):
+    if any(ch in out for ch in "\x00\x18\x9b\x9c\x9d\u202e"):
         failed += 1
         print(f"FAIL fuzz control {s!r} -> {out!r}")
 
