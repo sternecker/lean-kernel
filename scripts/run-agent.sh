@@ -179,11 +179,23 @@ b["boot_args"] = b["boot_args"].replace(" rw ", " ro ") + \
     f" agent_mode={mode} agent_exec={agent_exec} agent_strace={agent_strace} agent_rows={rows} agent_cols={cols} agent_term={term}"
 if mode == "interactive":  # keep boot messages off the raw terminal; out/agent.log has them in headless mode
     b["boot_args"] += " quiet"
+# Firecracker rate limiters (token buckets, refill_time in ms): without one, a hostile guest can drive
+# the host's disk as hard as the VMM thread can issue I/O, starving everything else on the host. The
+# buckets are sized well above what Claude Code does; one_time_burst covers start-up, when the root
+# drive's Claude Code binary is read in one go, so boot isn't slowed.
+def limiter(mib_per_s, ops_per_s, burst_mib=0):
+    bw = {"size": mib_per_s << 20, "refill_time": 1000}
+    if burst_mib:
+        bw["one_time_burst"] = burst_mib << 20
+    return {"bandwidth": bw, "ops": {"size": ops_per_s, "refill_time": 1000}}
 c["drives"][0]["is_read_only"] = True
+c["drives"][0]["rate_limiter"] = limiter(200, 5000, burst_mib=1024)
 c["drives"].append({"drive_id": "scratch", "path_on_host": scratch,
-                    "is_root_device": False, "is_read_only": False})
+                    "is_root_device": False, "is_read_only": False,
+                    "rate_limiter": limiter(100, 5000, burst_mib=256)})
 c["drives"].append({"drive_id": "task", "path_on_host": task_img,
-                    "is_root_device": False, "is_read_only": True})
+                    "is_root_device": False, "is_read_only": True,
+                    "rate_limiter": limiter(1, 100)})
 c["machine-config"]["mem_size_mib"] = 2048
 json.dump(c, open(p, "w"), indent=2)
 EOF
