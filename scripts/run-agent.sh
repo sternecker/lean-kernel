@@ -46,6 +46,8 @@ esac
   || die "the installed $WRAPPER predates per-run directories; rerun: sudo scripts/jail-setup.sh"
 [[ $jailed == 0 ]] || grep -q 'seccomp-filter.bpf' "$WRAPPER" \
   || die "the installed $WRAPPER predates the tightened seccomp filter; rerun: sudo scripts/jail-setup.sh"
+[[ $jailed == 0 ]] || { grep -q -e '--new-pid-ns' "$WRAPPER" && grep -q -e '--landlock require' "$WRAPPER"; } \
+  || die "the installed $WRAPPER predates the PID namespace and the proxy's Landlock; rerun: sudo scripts/jail-setup.sh"
 [[ $jailed == 1 || -x "$FC" ]] || die "firecracker missing; run make deps"
 # Every Firecracker here runs under the tightened release filter (scripts/seccomp-filter.sh); the jail
 # uses the root-owned copy jail-setup built, the unjailed path the one in out/.
@@ -243,7 +245,7 @@ if [[ "$mode" == headless || "$mode" == selftest ]]; then
   show_fclog
   show_canary
   # Printed by init after the agent exits: whether Claude Code loaded the image's managed settings.
-  grep -m1 '^MANAGED-HOOKS=' "$log" | sed 's/^/managed settings: /; s/MANAGED-HOOKS=//' || true   # absent in selftest mode
+  grep -m1 '^MANAGED-HOOKS=' "$log" | sed 's/^/managed settings: /; s/MANAGED-HOOKS=//' | sanitize || true   # absent in selftest mode
   # Agent output lines start with "| "; skip them so an agent that merely mentions a panic is not one.
   grep -v '^| ' "$log" | grep -q 'Kernel panic' && die "guest panicked; see $log"
   if [[ "$mode" == selftest ]]; then

@@ -34,6 +34,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -I tests/api-proxy-test.py       # proxy heade
 PYTHONDONTWRITEBYTECODE=1 python3 -I tests/console-filter-test.py  # escape-sequence filter, split-read, fuzz, STOK corpus
 PYTHONDONTWRITEBYTECODE=1 python3 -I tests/seccomp-test.py         # seccomp block in api-proxy.py and console-filter.py
 PYTHONDONTWRITEBYTECODE=1 python3 -I tests/tool-shell-test.py      # compiles guest/tool-shell.c without MDWE, runs probe
+PYTHONDONTWRITEBYTECODE=1 python3 -I tests/jail-policy-test.py    # static: the host-side hardening in the shell scripts stays in place
 PYTHONDONTWRITEBYTECODE=1 python3 -I tests/invisible-chars-test.py # no literal bidi/zero-width characters anywhere
 shellcheck -x -P SCRIPTDIR --severity=warning scripts/*.sh scripts/lean-agent-jail guest/*.sh
 ```

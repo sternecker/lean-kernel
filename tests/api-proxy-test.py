@@ -128,6 +128,7 @@ for b, ok, what in [
     (body(messages=[{"role": "assistant", "content": [{"type": "tool_use", "id": "t", "name": "x",
                                                        "input": {"source": {"type": "url", "url": "https://x/"}}}]}]),
      True, "url inside tool_use input is the agent's own argument"),
+    (b'{"model":"m","max_tokens":1e999,"messages":[]}', False, "non-finite number"),
     (body(thread={"type": "continue", "previous_message_id": "msg_other"}), False, "thread continue"),
     (body(diagnostics={"previous_message_id": "msg_other"}), False, "diagnostics"),
 ]:
@@ -144,6 +145,107 @@ for b, what in [(body(**{big: 1}), "field name"),
     check(f"refusal cut: {what}", why is not None and len(why) < 200, why and len(why))
 refused = ap.Budget(0, 0, 0, 0, "").admit([big])   # a non-string model is refused with its repr
 check("refusal cut: model", refused and len(refused[2]) < 200, refused and len(refused[2]))
+
+# Budget: requests in flight reserve against the token budgets, so concurrent ones can't all pass the same check.
+b = ap.Budget(0, 1000, 500, 0, "")
+check("budget: first reservation admitted", b.admit("m", 1000, 100) is None)
+check("budget: a second request sees the first's input reservation", b.admit("m", 1, 1) is not None)
+b.charge(300, 100, (1000, 100))   # real usage replaces the reservation
+check("budget: released reservation frees room", b.admit("m", 1, 500) is None and b.inp == 300)
+check("budget: a second request sees the output reservation", b.admit("m", 1, 1) is not None)
+b.charge(0, 0, (1, 500))
+check("budget: output reservation released", b.admit("m", 1, 1) is None)
+# Reservations alone reaching a limit is a retry (429); tokens actually spent reaching it ends the session (403).
+b = ap.Budget(0, 0, 50000, 0, "")
+check("budget: two parallel requests admitted", b.admit("m", 1, 32000) is None and b.admit("m", 1, 32000) is None)
+r = b.admit("m", 1, 32000)
+check("budget: reservation-only overflow is a 429", r is not None and r[0] == 429, r)
+b.charge(0, 50000, (1, 32000))
+r = b.admit("m", 1, 1)
+check("budget: spent budget is a 403", r is not None and r[0] == 403, r)
+# max_tokens is what the budget reserves: anything but a positive int is refused, not forwarded and counted as 0.
+for mt, ok in ((32000, True), (32000.0, False), ("32000", False), (True, False), (0, False), (-1, False)):
+    why, _ = ap.body_policy(json.dumps({"model": "m", "max_tokens": mt, "messages": []}).encode())
+    check(f"max_tokens {mt!r}", (why is None) == ok, why)
+check("max_tokens may be absent (count_tokens)", ap.body_policy(b'{"model":"m","messages":[]}')[0] is None)
+check("budget: unlimited ignores reservations", ap.Budget(0, 0, 0, 0, "").admit("m", 10**9, 10**9) is None)
+# A stream cut off before message_delta is charged what it asked for, not what it had streamed.
+u = ap.Usage("text/event-stream")
+u.feed(b'data: {"type":"message_start","message":{"usage":{"input_tokens":5,"output_tokens":1}}}\n')
+check("usage: cut stream is not complete", not u.complete and u.finish() == (5, 1))
+u.feed(b'data: {"type":"message_delta","usage":{"output_tokens":9}}\n')
+check("usage: final delta completes it", u.complete and u.finish() == (5, 9))
+# A stream the API ends with an error event is marked as such, with what it had streamed as its estimate.
+u = ap.Usage("text/event-stream")
+u.feed(b'data: {"type":"message_start","message":{"usage":{"input_tokens":5,"output_tokens":1}}}\n')
+u.feed(b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}\n')
+u.feed(b'event: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}\n')
+check("usage: error event marks the stream", u.errored and not u.complete)
+check("usage: streamed estimate covers the deltas", 1 < u.streamed_estimate() < 100, u.streamed_estimate())
+# Request bytes in flight are capped (a body costs BODY_COST times its size while held).
+bb = ap.ByteBudget(100)
+check("bytes: fits", bb.acquire(60))
+check("bytes: over the cap refused", not bb.acquire(60))
+bb.release(60)
+check("bytes: released", bb.acquire(100))
+check("bytes: cap 0 is unlimited", ap.ByteBudget(0).acquire(10**12))
+
+# Landlock: after install_landlock a process reads the interpreter and /etc, not other files, and (ABI 6+)
+# can't reach another process's abstract unix socket. Run in a child; skipped where the kernel has no Landlock.
+import socket
+import tempfile
+secret_dir = tempfile.mkdtemp(dir=os.environ.get("TMPDIR", "/tmp"))
+secret = os.path.join(secret_dir, "secret")
+open(secret, "w").write("x")
+# A resolver file that is a symlink out of /etc (systemd-resolved: /etc/resolv.conf -> /run/systemd/resolve/...):
+# its real directory must stay readable, while other directories (secret_dir) stay denied.
+resolv_dir = tempfile.mkdtemp(dir=os.environ.get("TMPDIR", "/tmp"))
+open(os.path.join(resolv_dir, "stub-resolv.conf"), "w").write("nameserver 127.0.0.53\n")
+resolv_link = os.path.join(tempfile.mkdtemp(dir=os.environ.get("TMPDIR", "/tmp")), "resolv.conf")
+os.symlink(os.path.join(resolv_dir, "stub-resolv.conf"), resolv_link)
+listener = socket.socket(socket.AF_UNIX)
+listener.bind("\0lean-test-" + str(os.getpid()))
+listener.listen(1)
+rfd, wfd = os.pipe()
+pid = os.fork()
+if pid == 0:
+    out = []
+    try:
+        ap.RESOLVER_FILES = ap.RESOLVER_FILES + (resolv_link,)
+        abi = ap.install_landlock(remove_in=(), required=False)
+        out.append(f"abi={abi}")
+        if abi:
+            for name, p in (("secret", secret), ("etc", "/etc/hostname"), ("resolv", resolv_link)):
+                try:
+                    open(p).close()
+                    out.append(f"{name}=read")
+                except OSError:
+                    out.append(f"{name}=denied")
+            try:
+                open(os.path.join(secret_dir, "new"), "w")
+                out.append("write=allowed")
+            except OSError:
+                out.append("write=denied")
+            c = socket.socket(socket.AF_UNIX)
+            try:
+                c.connect("\0lean-test-" + str(os.getppid()))
+                out.append("abstract=connected")
+            except OSError:
+                out.append("abstract=denied")
+    except BaseException as e:
+        out.append(f"error={e!r}")
+    os.write(wfd, " ".join(out).encode())
+    os._exit(0)
+os.waitpid(pid, 0)
+res = os.read(rfd, 4096).decode()
+if "abi=0" in res or not res:
+    print("skip: Landlock not available here")
+elif not secret.startswith(tuple({sys.prefix, sys.base_prefix, "/usr", "/etc"})):
+    check("landlock: secret file denied", "secret=denied" in res, res)
+    check("landlock: /etc readable", "etc=read" in res, res)
+    check("landlock: no writes", "write=denied" in res, res)
+    check("landlock: resolver file behind a symlink readable", "resolv=read" in res, res)
+    check("landlock: abstract sockets scoped (ABI 6+)", "abstract=denied" in res or int(res.split("abi=")[1].split()[0]) < 6, res)
 import io
 buf, keep = io.StringIO(), ap.LOG
 ap.LOG = buf
@@ -239,6 +341,146 @@ check("escaped canary counted once", ap.CANARY_HITS.count == 2, ap.CANARY_HITS.c
 status("/v1/messages", b=body(speed="fast", system=ap.CANARY))
 check("canary in a refused body counted", ap.CANARY_HITS.count == 3, ap.CANARY_HITS.count)
 ap.LOG, ap.LOG_LIMIT.tokens = keep, keep_tokens
+
+# Through the handler: what a /v1/messages stream is charged. A fake upstream sends an SSE body; the budget's
+# output total afterwards is what the proxy charged for it (max_tokens here is 32000, as Claude Code sends).
+class FakeResp:
+    status, reason = 200, "OK"
+
+    def __init__(self, chunks):
+        self.chunks = list(chunks)
+
+    def getheaders(self):
+        return [("Content-Type", "text/event-stream")]
+
+    def getheader(self, k, default=None):
+        return {"content-type": "text/event-stream"}.get(k.lower(), default)
+
+    def read1(self, n):
+        return self.chunks.pop(0) if self.chunks else b""
+
+
+START = b'data: {"type":"message_start","message":{"usage":{"input_tokens":5,"output_tokens":1}}}\n'
+DELTA = b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}\n'
+streams = {
+    "error": [START, DELTA, b'event: error\ndata: {"type":"error","error":{"type":"overloaded_error"}}\n'],
+    "cut": [START, DELTA],
+    "done": [START, DELTA, b'data: {"type":"message_delta","usage":{"output_tokens":7}}\n'],
+}
+
+
+def charged(kind):
+    class StreamUp(FakeUp):
+        def request(self, *a, **kw):
+            pass
+
+        def getresponse(self):
+            return FakeResp(streams[kind])
+
+    ap.UpstreamConnection = StreamUp
+    ap.BUDGET = ap.Budget(0, 0, 0, 0, "")
+    b = body(max_tokens=32000, stream=True)
+    s = socket.socket(socket.AF_UNIX)
+    s.connect(sock)
+    s.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+              b"Content-Length: " + str(len(b)).encode() + b"\r\n\r\n" + b)
+    while s.recv(65536):
+        pass
+    s.close()
+    for _ in range(50):   # the handler charges in its finally, after the guest has the last byte
+        if ap.BUDGET.out or ap.BUDGET.res_out == 0:
+            break
+        time.sleep(0.02)
+    return ap.BUDGET.out
+
+
+import time
+
+
+# The guest hangs up while the API is still working: the reply it never read is billed, so it is charged
+# (it was charged nothing: usage was only set up after the headers had been written to the guest).
+def charged_after_hangup():
+    release = threading.Event()
+
+    class SlowUp(FakeUp):
+        def request(self, *a, **kw):
+            pass
+
+        def getresponse(self):
+            release.wait(5)
+            return FakeResp([START, DELTA, b'data: {"type":"message_delta","usage":{"output_tokens":7}}\n'] * 2000)
+
+    ap.UpstreamConnection = SlowUp
+    ap.BUDGET = ap.Budget(0, 0, 0, 0, "")
+    b = body(max_tokens=32000, stream=True)
+    s = socket.socket(socket.AF_UNIX)
+    s.connect(sock)
+    s.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+              b"Content-Length: " + str(len(b)).encode() + b"\r\n\r\n" + b)
+    time.sleep(0.2)
+    s.close()
+    release.set()
+    for _ in range(100):
+        if ap.BUDGET.out:
+            break
+        time.sleep(0.02)
+    return ap.BUDGET.inp, ap.BUDGET.out
+
+
+i_, o_ = charged_after_hangup()
+check("handler: a guest that hangs up before the reply is still charged", o_ > 0 and i_ > 0, (i_, o_))
+
+# A body that is all JSON structure costs far more memory than its bytes: refused when it can never fit.
+# B3: a line break in a header value (a folded header) is refused, forwarded header or not.
+why, _ = ap.upstream_headers([("User-Agent", "a\r\n\tb")])
+check("headers: folded value refused", why is not None, why)
+why, _ = ap.upstream_headers([("X-Unlisted", "a\nb")])
+check("headers: line break in an unlisted header refused", why is not None, why)
+# A policy denial counts as refused in the session summary.
+ap.BUDGET = ap.Budget(0, 0, 0, 0, "")
+ap.BUDGET.note_refused()
+check("budget: policy denial counted", "1 refused" in ap.BUDGET.summary(), ap.BUDGET.summary())
+
+ap.UpstreamConnection = FakeUp
+ap.BUDGET = ap.Budget(0, 0, 0, 0, "")
+keep_inflight, ap.INFLIGHT = ap.INFLIGHT, ap.ByteBudget(1 << 20)
+
+
+def post(b):
+    s = socket.socket(socket.AF_UNIX)
+    s.connect(sock)
+    s.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+              b"Content-Length: " + str(len(b)).encode() + b"\r\n\r\n" + b)
+    line = s.makefile("rb").readline().split()
+    s.close()
+    return int(line[1]) if len(line) > 1 else None
+
+
+check("handler: dense JSON body refused (413)", post(body(messages=[[] for _ in range(20000)])) == 413)
+check("handler: ordinary body still forwarded", post(body()) == 502)
+# The handler thread releases after it has written the reply, which the client can read first: wait for it.
+for _ in range(100):
+    if ap.INFLIGHT.used == 0:
+        break
+    time.sleep(0.02)
+check("handler: in-flight bytes released", ap.INFLIGHT.used == 0, ap.INFLIGHT.used)
+ap.INFLIGHT = keep_inflight
+
+# The proxy's seccomp filter refuses socketpair(): it would hand out AF_UNIX sockets socket() is denied.
+import subprocess
+snippet = (
+    "import importlib.util, socket, sys\n"
+    "s = importlib.util.spec_from_file_location('ap', sys.argv[1]); ap = importlib.util.module_from_spec(s); s.loader.exec_module(ap)\n"
+    "ap.install_seccomp(extra_deny=(53,), socket_families=(socket.AF_INET, socket.AF_INET6))\n"
+    "try:\n    socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)\n    sys.exit(1)\nexcept OSError:\n    sys.exit(0)\n")
+rc = subprocess.run([sys.executable, "-I", "-c", snippet, os.path.join(here, "..", "scripts", "api-proxy.py")]).returncode
+check("seccomp: socketpair refused", rc == 0, rc)
+check("main denies socketpair", "extra_deny=(53,)" in open(os.path.join(here, "..", "scripts", "api-proxy.py")).read())
+
+c = charged("error")
+check("handler: stream ended by an API error is charged what it streamed", 0 < c < 100, c)
+check("handler: stream cut off without an error is charged max_tokens", charged("cut") == 32000)
+check("handler: complete stream is charged the reported usage", charged("done") == 7)
 srv.shutdown()
 
 print("FAIL" if fails else "ok", f"({fails} failures)")
