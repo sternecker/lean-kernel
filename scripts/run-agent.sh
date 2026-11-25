@@ -150,6 +150,14 @@ plog="$RUN/agent-proxy.log"
 # Jailed: Firecracker's own stderr (jailer errors, VMM errors), kept off the terminal and shown stripped.
 fclog="$RUN/firecracker.log"
 show_fclog() { [[ -s "$fclog" ]] && { echo "--- firecracker ---"; tail -n 20 "$fclog" | sanitize; }; return 0; }
+# api-proxy.py's tripwire: a request body carried the guest's placeholder credential (api-proxy.py, CANARY).
+# Anchored on the timestamp, so guest-chosen text elsewhere in a line can't fake or hide one.
+show_canary() {
+  local n; n="$(grep -cE '^[0-9]{2}:[0-9]{2}:[0-9]{2} CANARY (POST|GET|PUT|DELETE|PATCH|HEAD|OPTIONS) ' "$plog" 2>/dev/null)" || true
+  [[ "${n:-0}" -gt 0 ]] || return 0
+  echo "*** CANARY: $n request(s) carried the guest's placeholder credential in the body: the agent read its"
+  echo "*** own credential into the conversation. Suspect a prompt injection; see $plog"
+}
 # The guest's exit status: the last AGENT-EXIT line init printed (agent lines are prefixed "| ").
 agent_exit() { grep '^AGENT-EXIT=' "$log" | tail -n 1; }
 
@@ -221,6 +229,7 @@ if [[ "$mode" == headless || "$mode" == selftest ]]; then
   if [[ -n "$denials" ]]; then echo "--- refused by jail-exec (seccomp type=1326, Landlock type=1423) ---"; echo "$denials" | sanitize; fi
   echo "--- proxy log ---"; tail -n 20 "$plog" 2>/dev/null | sanitize
   show_fclog
+  show_canary
   # Printed by init after the agent exits: whether Claude Code loaded the image's managed settings.
   grep -m1 '^MANAGED-HOOKS=' "$log" | sed 's/^/managed settings: /; s/MANAGED-HOOKS=//' || true   # absent in selftest mode
   # Agent output lines start with "| "; skip them so an agent that merely mentions a panic is not one.
@@ -248,4 +257,5 @@ else
   "${launch[@]}" | python3 -I "$ROOT/scripts/console-filter.py"
   [[ -n "$cleanup_tty" ]] && stty "$cleanup_tty"   # cooked again for the tail below; finish() restores and flushes too
   show_fclog
+  show_canary
 fi
