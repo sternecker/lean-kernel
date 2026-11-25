@@ -71,7 +71,8 @@ jobs:
       - name: shellcheck (warnings and errors)
         run: shellcheck -x -P SCRIPTDIR --severity=warning scripts/*.sh scripts/lean-agent-jail guest/*.sh
       - name: pyflakes
-        run: pyflakes3 scripts/*.py tests/*.py
+        # As a module: Debian's python3-pyflakes has no pyflakes3 command in trixie.
+        run: python3 -I -m pyflakes scripts/*.py tests/*.py
       - name: Guest C, built as the images build it (gcc -static -Wall -Wextra -Werror)
         run: |
           for f in guest/jail-exec.c guest/jit-probe.c guest/tool-shell.c tests/probe.c; do
