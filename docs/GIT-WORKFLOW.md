@@ -17,7 +17,7 @@ relying on them, because branch counts go stale in days.
 | Worktrees | one per branch: `~/repos/lean-kernel`, `~/repos/lean-kernel-devtools`, `~/repos/lean-kernel-pantsdown` | `git worktree list` |
 | Branch protection on `main` | none | `gh api repos/sternecker/lean-kernel/branches/main/protection` (404 = none) |
 | Commit signing | not configured | `git config commit.gpgsign` (empty) |
-| CI | `.github/workflows/build.yml` on every push and PR; read-only token, inputs pinned by digest. It builds the kernel and runs `make fetch config build check syscalls`. **It does not run `tests/*.py`, shellcheck, or any boot test.** | `grep -n -E 'tests/\|shellcheck' .github/workflows/build.yml` (no hits) |
+| CI | `.github/workflows/build.yml` on every push and PR; read-only token, inputs pinned by digest. Job `kernel` runs `make fetch config build check syscalls`; job `checks` runs the `tests/*.py` policy tests, shellcheck, pyflakes, cppcheck, the invisible-character check and the guest C build. **No boot test runs in CI.** | `grep -n -E 'tests/\|shellcheck' .github/workflows/build.yml` |
 
 Because the repo is public and `main` is unprotected, **anything you push is published immediately and a
 force-push is possible by accident.** The rest of this document follows from that.
@@ -74,14 +74,15 @@ Rules:
    PYTHONDONTWRITEBYTECODE=1 python3 -I tests/console-filter-test.py
    PYTHONDONTWRITEBYTECODE=1 python3 -I tests/seccomp-test.py
    PYTHONDONTWRITEBYTECODE=1 python3 -I tests/tool-shell-test.py
-   shellcheck scripts/*.sh scripts/lean-agent-jail guest/*.sh   # installed on this host
+   PYTHONDONTWRITEBYTECODE=1 python3 -I tests/invisible-chars-test.py
+   shellcheck -x -P SCRIPTDIR --severity=warning scripts/*.sh scripts/lean-agent-jail guest/*.sh
    ```
-   Kernel-side changes also need `make fetch config build check` (CI runs that chain). **CI does not
-   run the Python tests or shellcheck, so green CI says nothing about the proxy, filter or jail code;
-   your local run is the only gate for those.** The boot tests (`make test`, `make agent-test`) need KVM
-   and Firecracker and cannot run in CI, so run them yourself before merging anything that touches
-   the guest or the jail. A cheap improvement is a second CI job that runs the four `tests/*.py` files
-   and shellcheck (neither needs KVM), after which "green CI" starts to mean something for those paths.
+   Kernel-side changes also need `make fetch config build check`. CI runs all of the above (the
+   `checks` job also runs pyflakes, cppcheck and the guest C build with `-Werror`), but run them before
+   pushing anyway: on an unprotected `main` a push is published before CI has said anything. **Green
+   CI says nothing about boot behaviour.** The boot tests (`make test`, `make agent-test`) need KVM and
+   Firecracker and cannot run in CI, so run them yourself before merging anything that touches the
+   guest or the jail.
 4. Push the topic branch and open a PR to `main`, even though you are the only reviewer. The PR is
    what makes CI run before the change is on `main`, and it leaves a record.
    ```bash

@@ -52,7 +52,7 @@ import sys
 ESC = "\x1b"
 # Ground state: a run of characters that pass unchanged. Not ESC (handled separately), not other C0
 # except BEL BS TAB LF CR, not DEL or C1, not the bidi/format controls. U+200D (ZWJ) stays: emoji use it.
-UNSAFE = "\x00-\x06\x0b\x0c\x0e-\x1f\x7f-\x9f؜​‌‎‏‪-‮⁦-⁩﻿"
+UNSAFE = "\x00-\x06\x0b\x0c\x0e-\x1f\x7f-\x9f\u061c\u200b\u200c\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff"
 SAFE_RUN = re.compile(f"[^{UNSAFE}]+")
 UNSAFE_CHAR = re.compile(f"[{UNSAFE}\x07-\x0a\x0d]")  # for titles: no controls at all
 

@@ -14,6 +14,9 @@ The credential is read from a file at startup and exists only in this process:
   --token-file FILE    Claude subscription OAuth token (from `claude setup-token`), sent as Bearer.
   --token-fd N         the same token, read from an inherited fd (the jail wrapper pipes it in, so
                        the proxy's own user never needs access to the file).
+A request body that carries the guest's placeholder credential (CANARY) is forwarded, logged as a CANARY
+line and counted in the session summary: detection of an agent reading its credential into the
+conversation, not a wall.
 Headers and bodies are never logged; one line per request: verdict, method, path, status, bytes, time,
 and for messages the tokens used and the running totals. Guest-chosen text in a refusal (a field name, a
 source type, a model) is cut to 64 characters, and every log line to MAX_LOG_LINE, so the guest can't
@@ -31,6 +34,7 @@ the API reports, so the request in flight when a budget runs out can overshoot i
 Usage: api-proxy.py --listen /path/vsock.sock_8080 --token-file ~/.config/lean-kernel/oauth-token
 """
 import argparse
+import base64
 import http.client
 import http.server
 import json
@@ -108,6 +112,33 @@ ALLOW_FIELDS = frozenset({
 ALLOW_SOURCES = frozenset({"base64", "text", "content"})
 MAX_DEPTH = 64
 MAX_LOG_LINE = 1024
+# The guest's placeholder credential: scripts/mkrootfs-agent.sh sets CLAUDE_CODE_OAUTH_TOKEN to it, and
+# tests/api-proxy-test.py checks the two match. Claude Code sends it in a header, which upstream_headers
+# drops. Nothing legitimate puts it in a request BODY: if it is there, the agent read its own credential
+# (its environment, /proc/self/environ) into the conversation, which is the first thing a prompt injection
+# hunting for secrets does. The proxy can't keep prompt content from reaching the API (README, "Does not
+# defend"), so this is a tripwire, not a wall: the request is forwarded (the placeholder is worth nothing,
+# and refusing would only break the session), and the hit is logged and counted (canary_check).
+# Matched as text, case-insensitively, in the bytes the guest sent and in the re-encoded body (so a JSON
+# \u escape doesn't hide it), and as base64 (standard or URL-safe) at any alignment. Hex, a split across
+# messages or any other encoding gets past: it catches a careless injection, not a careful one.
+CANARY = "placeholder-real-token-is-added-by-the-host-proxy"
+
+
+def _b64_cores(raw):
+    """The part of base64(raw) that doesn't depend on the bytes around raw, for each of the three
+    alignments raw can start at: the first and last 4-character groups also encode neighbouring bytes
+    (or padding), so they are dropped. Standard and URL-safe alphabets both."""
+    out = set()
+    for i in range(3):
+        core = base64.b64encode(b"\0" * i + raw)[4:-4]
+        out.add(core)
+        out.add(core.translate(bytes.maketrans(b"+/", b"-_")))
+    return frozenset(out)
+
+
+CANARY_TEXT = CANARY.lower().encode()
+CANARY_B64 = _b64_cores(CANARY.encode())
 
 
 def _short(v, n=64):
@@ -445,6 +476,40 @@ def log(line, always=False):
     LOG.flush()
 
 
+def canary_seen(body):
+    """How the placeholder credential appears in body (bytes): "as text", "as base64", or None."""
+    if CANARY_TEXT in body.lower():
+        return "as text"
+    if any(f in body for f in CANARY_B64):
+        return "as base64"
+    return None
+
+
+class CanaryHits:
+    """Requests whose body carried CANARY. The first hit of a session is logged past the log's rate limit
+    and cap (always=True), so a guest that floods the log first can't hide it; later ones are ordinary,
+    limited lines, so the guest can't use the tripwire to grow the log. The count is in the summary."""
+
+    def __init__(self):
+        self.count = 0
+        self.lock = threading.Lock()
+
+    def check(self, method, path, body):
+        """Look for CANARY in body; log and count a hit. Return whether there was one."""
+        how = canary_seen(body)
+        if not how:
+            return False
+        with self.lock:
+            self.count += 1
+            first = self.count == 1
+        log(f"CANARY {method} {path}: the guest's placeholder credential is in the request body ({how}); "
+            "the agent read its own credential into the conversation (prompt injection?)", always=first)
+        return True
+
+
+CANARY_HITS = CanaryHits()
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     # Idle limit on the guest side of a connection (socket timeout, set by StreamRequestHandler):
@@ -496,6 +561,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             log(f"DENY  {self.command} {path_only} (body {n} bytes)")
             return self.deny(413, "request body too large")
         body = self.rfile.read(n)
+        # Before any refusal below, so a request refused for another reason still trips it.
+        canary = CANARY_HITS.check(self.command, path_only, body)
         why, headers = upstream_headers(self.headers.items())
         if why:
             log(f"DENY  {self.command} {path_only} ({why})")
@@ -505,6 +572,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             log(f"DENY  {self.command} {path_only} ({why})")
             return self.deny(403, why)
         body = canonical(req)  # forward what was checked, not what was sent
+        if not canary:  # JSON escapes are decoded now: "\u0070laceholder-..." is plain text here
+            CANARY_HITS.check(self.command, path_only, body)
         refused = BUDGET.admit(req.get("model"))
         if refused:
             code, etype, msg = refused
@@ -767,6 +836,9 @@ def main():
         dropped = LOG_LIMIT.dropped
         log(BUDGET.summary() + f", {getattr(srv, 'refused', 0)} connections over the limit"
             + (f", {dropped} log lines dropped" if dropped else ""), always=True)
+        if CANARY_HITS.count:
+            log(f"CANARY {CANARY_HITS.count} request(s) this session carried the guest's placeholder "
+                "credential in the body; read the conversation for a prompt injection", always=True)
         srv.server_close()
         try:
             os.unlink(a.listen)

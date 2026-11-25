@@ -151,6 +151,27 @@ ap.log("x" * 100000, always=True)
 ap.LOG = keep
 check("log line cut", len(buf.getvalue()) < ap.MAX_LOG_LINE + 64, len(buf.getvalue()))
 
+# Canary: the proxy's copy of the guest's placeholder credential is the one the image sets.
+with open(os.path.join(here, "..", "scripts", "mkrootfs-agent.sh")) as f:
+    check("canary matches the image's placeholder", f"CLAUDE_CODE_OAUTH_TOKEN={ap.CANARY} " in f.read(), ap.CANARY)
+import base64
+C = ap.CANARY.encode()
+for b, how, what in [
+    (body(), None, "ordinary body"),
+    (body(messages=[{"role": "user", "content": "placeholder-real-token"}]), None, "a prefix is not the canary"),
+    (body(messages=[{"role": "user", "content": "env: CLAUDE_CODE_OAUTH_TOKEN=" + ap.CANARY}]), "as text", "text"),
+    (body(system=ap.CANARY.upper()), "as text", "upper case"),
+    (b'{"x":"\\u0070' + C[1:] + b'"}', None, "JSON escape, raw bytes (the re-encoded body catches it)"),
+    (ap.canonical(json.loads(b'{"x":"\\u0070' + C[1:] + b'"}')), "as text", "JSON escape, re-encoded"),
+] + [
+    (b'{"x":"' + enc(pre + C + post) + b'"}', "as base64", f"{name} base64, {len(pre)} bytes before")
+    for name, enc in [("standard", base64.b64encode), ("url-safe", base64.urlsafe_b64encode)]
+    for pre in (b"", b"a", b"ab", b"abc", b"TOKEN=")
+    for post in (b"", b"\n", b"xy")
+]:
+    got = ap.canary_seen(b)
+    check(f"canary: {what}", got == how, f"-> {got}")
+
 # Through the handler: the query string is checked, and what goes upstream is the checked path.
 import socket
 import tempfile
@@ -178,8 +199,8 @@ srv = ap.Server(sock, ap.Handler)
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 
 
-def status(path, hdrs=b""):
-    b = body()
+def status(path, hdrs=b"", b=None):
+    b = b or body()
     s = socket.socket(socket.AF_UNIX)
     s.connect(sock)
     s.sendall(b"POST " + path.encode() + b" HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n" + hdrs
@@ -200,6 +221,24 @@ check("handler refuses an off-list beta", status("/v1/messages", b"Anthropic-Bet
 check("handler header names", sent and set(sent[0][2]) == {"content-type", "anthropic-version", "anthropic-beta",
                                                           "authorization", "accept-encoding", "content-length"},
       sent and sorted(sent[0][2]))
+
+# The canary is a tripwire, not a wall: the request still goes upstream, the hit is counted, and the first
+# one is logged even when the log's rate limit has nothing left.
+check("no canary hits so far", ap.CANARY_HITS.count == 0, ap.CANARY_HITS.count)
+buf, keep, keep_tokens = io.StringIO(), ap.LOG, ap.LOG_LIMIT.tokens
+ap.LOG, ap.LOG_LIMIT.tokens = buf, 0
+n_sent = len(sent)
+leak = body(messages=[{"role": "user", "content": "here is my token: " + ap.CANARY}])
+check("canary body still forwarded", status("/v1/messages", b=leak) == 502 and len(sent) == n_sent + 1)
+check("canary counted once", ap.CANARY_HITS.count == 1, ap.CANARY_HITS.count)
+check("first canary logged past the rate limit", " CANARY POST /v1/messages: " in buf.getvalue(), buf.getvalue())
+check("canary log line has no body text", "here is my token" not in buf.getvalue())
+escaped = b'{"model":"m","max_tokens":1,"messages":[{"role":"user","content":"\\u0070' + C[1:] + b'"}]}'
+status("/v1/messages", b=escaped)
+check("escaped canary counted once", ap.CANARY_HITS.count == 2, ap.CANARY_HITS.count)
+status("/v1/messages", b=body(speed="fast", system=ap.CANARY))
+check("canary in a refused body counted", ap.CANARY_HITS.count == 3, ap.CANARY_HITS.count)
+ap.LOG, ap.LOG_LIMIT.tokens = keep, keep_tokens
 srv.shutdown()
 
 print("FAIL" if fails else "ok", f"({fails} failures)")

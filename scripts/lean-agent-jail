@@ -290,7 +290,8 @@ cleanup() {
   # symlink would make root copy out a file Firecracker's uid can't read.
   # Only after a VM ran: an early failure must not overwrite the run's copy with nothing.
   if [[ $started == 1 ]]; then
-    as_fc cat -- "$jail/scratch.ext4" 2>/dev/null | as_owner sh -c 'cat > "$1.new" && mv -f -- "$1.new" "$1"' sh "$RUNDIR/scratch.ext4" || true
+    as_fc cat -- "$jail/scratch.ext4" 2>/dev/null \
+      | as_owner sh -c 'dd of="$1.new" bs=64K iflag=fullblock conv=sparse status=none && mv -f -- "$1.new" "$1"' sh "$RUNDIR/scratch.ext4" || true
   fi
   ip netns del "$ns" 2>/dev/null || true
   [[ -d "/sys/fs/cgroup/$CG_PARENT/$id" ]] && rmdir "/sys/fs/cgroup/$CG_PARENT/$id" 2>/dev/null || true
@@ -314,7 +315,9 @@ mkdir -m 0700 "$jail" "$pdir"
 
 put() {  # put SRC DEST MODE OWNER: read SRC as OWNER, write DEST (new, in a root-owned dir) as root
   [[ ! -e "$2" && ! -L "$2" ]] || die "$2 already exists"
-  as_owner cat -- "$1" > "$2" || die "can't read $1"
+  # Sparse on the writing side: runs of zero blocks become holes, so a mostly-empty drive (the scratch
+  # image is a fresh mkfs) costs no disk and no writes. Byte-identical either way; the read stays as OWNER.
+  as_owner cat -- "$1" | dd of="$2" bs=64K iflag=fullblock conv=sparse status=none || die "can't read $1"
   chmod "$3" "$2"; chown -h "$4" "$2"
 }
 put "$OUT/bzImage"            "$jail/bzImage"      0444 root:root

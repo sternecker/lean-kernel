@@ -16,6 +16,7 @@
 #include <sched.h>
 #include <unistd.h>
 #include <linux/perf_event.h>
+#include <sys/ioctl.h>
 #include <sys/klog.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
@@ -297,6 +298,18 @@ static void unpriv_checks(void)
 	int code = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
 	snprintf(d, sizeof d, "%s", code == 0 ? "attached to sibling" : strerror(code));
 	result(code == EPERM, "ptrace sibling (yama)", d);
+
+	// LEGACY_TIOCSTI=n: without CAP_SYS_ADMIN, TIOCSTI (push bytes into a tty's input queue, i.e. type
+	// commands into whoever reads that terminal) fails with EIO. jail-exec allows ioctl with any argument,
+	// so this config line is all that stops it for the agent. stdout is the console here; the byte pushed
+	// if the check ever failed is a harmless newline.
+	if (isatty(STDOUT_FILENO)) {
+		char nl = '\n';
+		errno = 0;
+		expect_errno("TIOCSTI (LEGACY_TIOCSTI=n)", ioctl(STDOUT_FILENO, TIOCSTI, &nl), EIO);
+	} else {
+		result(0, "TIOCSTI (LEGACY_TIOCSTI=n)", "stdout is not a tty, nothing to probe");
+	}
 
 	// Root-only syscalls that are still compiled in: capability checks are what stop the agent.
 	errno = 0; expect_errno("unshare(CLONE_NEWNS)", unshare(CLONE_NEWNS), EPERM);

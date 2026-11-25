@@ -143,13 +143,21 @@ truncate -s %4096 "$task_img"
 # hide text on screen.
 sanitize() {
   python3 -I -c 'import re, sys
-sys.stdout.write(re.sub(r"[\x00-\x08\x0b-\x1f\x7f-\x9f؜​-‏‪-‮⁦-⁩﻿]", "", sys.stdin.buffer.read().decode("utf-8", "replace")))'
+sys.stdout.write(re.sub(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u061c\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]", "", sys.stdin.buffer.read().decode("utf-8", "replace")))'
 }
 log="$RUN/agent.log"
 plog="$RUN/agent-proxy.log"
 # Jailed: Firecracker's own stderr (jailer errors, VMM errors), kept off the terminal and shown stripped.
 fclog="$RUN/firecracker.log"
 show_fclog() { [[ -s "$fclog" ]] && { echo "--- firecracker ---"; tail -n 20 "$fclog" | sanitize; }; return 0; }
+# api-proxy.py's tripwire: a request body carried the guest's placeholder credential (api-proxy.py, CANARY).
+# Anchored on the timestamp, so guest-chosen text elsewhere in a line can't fake or hide one.
+show_canary() {
+  local n; n="$(grep -cE '^[0-9]{2}:[0-9]{2}:[0-9]{2} CANARY (POST|GET|PUT|DELETE|PATCH|HEAD|OPTIONS) ' "$plog" 2>/dev/null)" || true
+  [[ "${n:-0}" -gt 0 ]] || return 0
+  echo "*** CANARY: $n request(s) carried the guest's placeholder credential in the body: the agent read its"
+  echo "*** own credential into the conversation. Suspect a prompt injection; see $plog"
+}
 # The guest's exit status: the last AGENT-EXIT line init printed (agent lines are prefixed "| ").
 agent_exit() { grep '^AGENT-EXIT=' "$log" | tail -n 1; }
 
@@ -171,11 +179,23 @@ b["boot_args"] = b["boot_args"].replace(" rw ", " ro ") + \
     f" agent_mode={mode} agent_exec={agent_exec} agent_strace={agent_strace} agent_rows={rows} agent_cols={cols} agent_term={term}"
 if mode == "interactive":  # keep boot messages off the raw terminal; out/agent.log has them in headless mode
     b["boot_args"] += " quiet"
+# Firecracker rate limiters (token buckets, refill_time in ms): without one, a hostile guest can drive
+# the host's disk as hard as the VMM thread can issue I/O, starving everything else on the host. The
+# buckets are sized well above what Claude Code does; one_time_burst covers start-up, when the root
+# drive's Claude Code binary is read in one go, so boot isn't slowed.
+def limiter(mib_per_s, ops_per_s, burst_mib=0):
+    bw = {"size": mib_per_s << 20, "refill_time": 1000}
+    if burst_mib:
+        bw["one_time_burst"] = burst_mib << 20
+    return {"bandwidth": bw, "ops": {"size": ops_per_s, "refill_time": 1000}}
 c["drives"][0]["is_read_only"] = True
+c["drives"][0]["rate_limiter"] = limiter(200, 5000, burst_mib=1024)
 c["drives"].append({"drive_id": "scratch", "path_on_host": scratch,
-                    "is_root_device": False, "is_read_only": False})
+                    "is_root_device": False, "is_read_only": False,
+                    "rate_limiter": limiter(100, 5000, burst_mib=256)})
 c["drives"].append({"drive_id": "task", "path_on_host": task_img,
-                    "is_root_device": False, "is_read_only": True})
+                    "is_root_device": False, "is_read_only": True,
+                    "rate_limiter": limiter(1, 100)})
 c["machine-config"]["mem_size_mib"] = 2048
 json.dump(c, open(p, "w"), indent=2)
 EOF
@@ -221,6 +241,7 @@ if [[ "$mode" == headless || "$mode" == selftest ]]; then
   if [[ -n "$denials" ]]; then echo "--- refused by jail-exec (seccomp type=1326, Landlock type=1423) ---"; echo "$denials" | sanitize; fi
   echo "--- proxy log ---"; tail -n 20 "$plog" 2>/dev/null | sanitize
   show_fclog
+  show_canary
   # Printed by init after the agent exits: whether Claude Code loaded the image's managed settings.
   grep -m1 '^MANAGED-HOOKS=' "$log" | sed 's/^/managed settings: /; s/MANAGED-HOOKS=//' || true   # absent in selftest mode
   # Agent output lines start with "| "; skip them so an agent that merely mentions a panic is not one.
@@ -248,4 +269,5 @@ else
   "${launch[@]}" | python3 -I "$ROOT/scripts/console-filter.py"
   [[ -n "$cleanup_tty" ]] && stty "$cleanup_tty"   # cooked again for the tail below; finish() restores and flushes too
   show_fclog
+  show_canary
 fi

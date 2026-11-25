@@ -1,6 +1,7 @@
 # Build and verify the kernel on every push and pull request: the pinned tarball, the fragment
 # verification, the byte-identical config check, the hardening checker with its accepted list, and the
-# syscall listing. It doesn't boot anything (make test needs KVM and Firecracker).
+# syscall listing. A second job (checks) runs the policy tests, the lint and the guest C build. Neither
+# boots anything (make test and make agent-test need KVM and Firecracker).
 #
 # It publishes nothing on purpose: a CI-built kernel's RANDSTRUCT layout is public the moment the
 # binary is (NOTES section 5). The build only proves the tree builds and verifies.
@@ -38,3 +39,44 @@ jobs:
         run: make check
       - name: Syscalls present and compiled out
         run: make syscalls
+
+  # Everything that needs neither KVM nor a kernel tree: the policy tests for the proxy, the console filter
+  # and the seccomp filters, the lint, and the guest C built the way the image builds it. Before this job,
+  # green CI said nothing about those paths (docs/GIT-WORKFLOW.md, section 3). Boot tests (make test,
+  # make agent-test) still have to be run by hand.
+  checks:
+    runs-on: ubuntu-latest
+    # The same pinned image as the kernel job; Debian's own packages for every tool, so nothing here is
+    # fetched from PyPI or another registry and there is no new pin to keep.
+    container: debian:trixie@sha256:9c6e381421d0f48d1b8133e573f33c185ee16cbf505eda9c4a8a4791b25ea8a6
+    timeout-minutes: 15
+    steps:
+      - name: Install tools
+        # Acquire::Retries=0: see the kernel job.
+        run: |
+          apt-get -o Acquire::Retries=0 update -q
+          apt-get -o Acquire::Retries=0 install -y -q --no-install-recommends \
+            python3 python3-pyflakes shellcheck cppcheck gcc libc6-dev
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2, pinned like every other input
+      - name: Policy tests (proxy, console filter, seccomp filters, tool-shell)
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          python3 -I tests/api-proxy-test.py
+          python3 -I tests/console-filter-test.py
+          python3 -I tests/seccomp-test.py
+          python3 -I tests/tool-shell-test.py
+      - name: No invisible or bidi characters in source
+        run: python3 -I tests/invisible-chars-test.py
+      - name: shellcheck (warnings and errors)
+        run: shellcheck -x -P SCRIPTDIR --severity=warning scripts/*.sh scripts/lean-agent-jail guest/*.sh
+      - name: pyflakes
+        # As a module: Debian's python3-pyflakes has no pyflakes3 command in trixie.
+        run: python3 -I -m pyflakes scripts/*.py tests/*.py
+      - name: Guest C, built as the images build it (gcc -static -Wall -Wextra -Werror)
+        run: |
+          for f in guest/jail-exec.c guest/jit-probe.c guest/tool-shell.c tests/probe.c; do
+            gcc -static -O2 -Wall -Wextra -Werror -o /tmp/c.out "$f"
+          done
+      - name: cppcheck
+        run: cppcheck --quiet --error-exitcode=1 --check-level=exhaustive --enable=warning,portability --inline-suppr --std=c11 guest/*.c tests/*.c

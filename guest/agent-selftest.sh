@@ -23,7 +23,8 @@ if [ "$who" = root ]; then
   check "/ mounted ro" "$(has_opt / ro)" "$(mount_opts /)"
   for m in /tmp /home/agent; do
     o="$(mount_opts "$m")"
-    want=noexec; [ "$agent_exec" = 1 ] && want=rw
+    # agent_exec: from the kernel cmdline via the guest init (mkrootfs-agent.sh); unset means 0
+    want=noexec; [ "${agent_exec:-0}" = 1 ] && want=rw
     check "$m nosuid,nodev,$want" "$(( $(has_opt "$m" nosuid) & $(has_opt "$m" nodev) & $(has_opt "$m" "$want") ))" "$o"
   done
   check "/proc hidepid=invisible" "$(has_opt /proc hidepid=invisible)" "$(mount_opts /proc)"

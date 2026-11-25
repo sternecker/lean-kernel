@@ -149,6 +149,10 @@ CONFIG_DEVTMPFS_MOUNT=y
 # CONFIG_NFC is not set
 # CONFIG_STAGING is not set
 # CONFIG_ACPI is not set
+# VMGENID reseeds the RNG when a VM is restored from a snapshot. This build never snapshots, and the
+# driver finds its device through ACPI or a device tree (CONFIG_OF), both off: kept, it is code that can
+# never run.
+# CONFIG_VMGENID is not set
 # HOTPLUG_CPU stays on: on x86 it is def_bool y whenever SMP is set (no prompt).
 # CONFIG_MEMORY_HOTPLUG is not set
 # CONFIG_KVM is not set

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Shared environment for lean-kernel scripts. Source, don't execute.
+# Variables set here are read by the scripts that source this file, which shellcheck can't see from here.
+# shellcheck disable=SC2034
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
