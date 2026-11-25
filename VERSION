@@ -18,8 +18,8 @@ FIRECRACKER_SHA256=06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade
 # Claude Code in the agent image, pinned: jail-exec's syscall allowlist was traced against this version.
 # Bump: install the new version on the host, scripts/mkrootfs-agent.sh --pin <version> prints both lines,
 # then redo the trace (HOWTO 6c) before trusting the allowlist with it.
-CLAUDE_CODE_VERSION=2.1.316
-CLAUDE_CODE_SHA256=fd13c70000fec3f2116dfbcbb6121210b4a29328bf0e46210a59dd594a67d824
+CLAUDE_CODE_VERSION=2.1.330
+CLAUDE_CODE_SHA256=f390eaa0814e6a1bff74cbb47acb74cb9c89d30ced809fe0af5af00c7bfe8ebb
 # Where the native installer (claude.ai/install.sh) gets releases: <URL>/<version>/linux-x64/claude, with
 # <URL>/<version>/manifest.json carrying each platform's sha256. mkrootfs-agent.sh downloads the pinned version
 # from here when neither the host install nor work/claude-code/ has it, and accepts it only if it matches the pin.

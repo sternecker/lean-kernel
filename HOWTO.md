@@ -3,12 +3,14 @@
 Host: Debian 13 (trixie), x86_64, KVM. Everything runs as your user except the one `apt install`
 and the optional tap device. Commands assume you are in the repo root.
 
-## 0. Where things stand (2026-11-01)
+## 0. Where things stand (2026-11-23)
 
 Working on the development host:
-- The kernel (`linux-6.18.60`, pinned and sha256-verified) configures, builds and passes `make check` and
-  `make test` in both profiles, the default (`out/`) and vsock-only (`out-vsock/`); `scripts/all.sh --vsock`
-  runs every step for both.
+- The kernel (`linux-6.18.65`, pinned and sha256-verified) configures, builds and passes `make check` and
+  `make test` in the default profile (`out/`); `agent-test` passes with Claude Code 2.1.330 (run with `JAIL=0`;
+  rerun it jailed after `sudo scripts/jail-setup.sh`). The vsock-only profile (`out-vsock/`, `scripts/all.sh --vsock`)
+  was last run on 6.18.60 and has not been redone on 6.18.65. The syscall allowlist was traced against Claude Code
+  2.1.316 and has not been retraced for 2.1.330 (6c).
 - The agent VM (9.5) runs Claude Code jailed: Firecracker under the jailer with a uid per run, the API proxy as
   `lean-proxy`, the credential outside the VM. `make agent-test` passes 32 checks (one of them records a known gap: in-process JIT works).
 
@@ -68,7 +70,7 @@ config: <repo>/out/.config
 
 - `warn ... not present in final config`: the option name doesn't exist in 6.18 (renamed or removed),
   or a dependency is off so Kconfig hides it. With `VSOCK_ONLY=1`, expect this for `CIFS`, `NFS_FS`,
-  `NFSD` and `SMB_SERVER`, which depend on `INET`. Harmless for an `is not set` line; look it up in `work/linux-6.18.60/` with
+  `NFSD` and `SMB_SERVER`, which depend on `INET`. Harmless for an `is not set` line; look it up in `work/linux-6.18.65/` with
   `grep -rn "config NAME" --include=Kconfig*` and fix the fragment so the warning goes away.
 - `FAIL ... wanted off, final config has =y`: a dependency turned the option back on. Find what selects it
   (`make O=out menuconfig`, then `/` search, shows "Selected by"). Either cut the selector too or
@@ -119,7 +121,7 @@ Firecracker starts with `vm/vm.json` (2 vCPUs, 512 MB, vsock CID 3, no network),
 terminal. The init script prints the first test:
 
 ```
-lean-kernel guest: 6.18.60
+lean-kernel guest: 6.18.65
 modules dir present? no
 io_uring: absent
 user ns:  absent
